@@ -1,7 +1,7 @@
 yfinance==0.2.66
 pandas>=2.3.3
 pandas-datareader>=0.10.0
-numpy>=2.3.4
+numpy>=2.2.6
 feature-engine>=1.9.3
 requests-cache>=1.2.1
 scikit-learn>=1.6.1
