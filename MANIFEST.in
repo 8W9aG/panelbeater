@@ -1,0 +1,3 @@
+include requirements.txt
+recursive-include panelbeater *.py
+recursive-include panelbeater *.csv
