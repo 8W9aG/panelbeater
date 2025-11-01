@@ -3,11 +3,12 @@
 import datetime
 
 import requests_cache
+import tqdm
 import wavetrainer as wt
 
 from .download import download
 from .features import features
-from .normalizer import normalize
+from .normalizer import denormalize, normalize
 
 _TICKERS = [
     # Equities
@@ -46,6 +47,7 @@ _WINDOWS = [
     200,
 ]
 _LAGS = [1, 3, 5, 10, 20, 30]
+_DAYS_OUT = 30
 
 
 def main() -> None:
@@ -61,8 +63,13 @@ def main() -> None:
     )
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
     df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
-    df_y = normalize(df=df_y)
-    wavetrainer.fit(df_x, y=df_y)
+    df_y_norm = normalize(df=df_y.copy())
+    for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
+        wavetrainer.fit(df_x, y=df_y_norm)
+        df_next = wavetrainer.transform(df_y_norm)
+        df_next = denormalize(df_next)
+        df_x = features(df=df_next.copy(), windows=_WINDOWS, lags=_LAGS)
+        df_y_norm = normalize(df=df_next.copy())
 
 
 if __name__ == "__main__":

@@ -63,8 +63,4 @@ def download(
     levels = pd.concat(
         [prices.add_prefix("PX_"), macro.add_prefix("MACRO_")], axis=1
     ).ffill()
-    return (
-        levels.replace([np.inf, -np.inf], np.nan)
-        .pct_change(fill_method=None)
-        .replace([np.inf, -np.inf], np.nan)
-    )
+    return levels.replace([np.inf, -np.inf], np.nan)

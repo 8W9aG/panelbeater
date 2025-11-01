@@ -36,7 +36,6 @@ def _meta_ticker_feature(
     for window in tqdm.tqdm(windows, desc="Generating window features"):
         dfs.append(df.rolling(window).mean().add_suffix(f"_rmean{window}"))  # type: ignore
         dfs.append(df.rolling(window).std().add_suffix(f"_rstd{window}"))  # type: ignore
-    dfs.append(df.diff().add_suffix("_diff1"))
     return pd.concat(dfs, axis=1).replace([np.inf, -np.inf], np.nan)
 
 
