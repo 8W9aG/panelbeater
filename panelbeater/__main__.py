@@ -56,9 +56,9 @@ def main() -> None:
     session = requests_cache.CachedSession("panelbeater-cache")
     wavetrainer = wt.create(
         "panelbeater-train",
-        walkforward_timedelta=datetime.timedelta(days=7),
+        walkforward_timedelta=datetime.timedelta(days=30),
         validation_size=datetime.timedelta(days=365),
-        test_size=datetime.timedelta(days=7),
+        test_size=datetime.timedelta(days=365),
         allowed_models={"catboost"},
         max_false_positive_reduction_steps=0,
     )
