@@ -54,6 +54,6 @@ def denormalize(df: pd.DataFrame) -> pd.DataFrame:
         mu = df[col].rolling(365).mean()
         sigma = df[col].rolling(365).std()
         value = (highest_std * sigma) + mu
-        df.loc[date_to_add, col] = value
+        df.loc[date_to_add, col] = df[col].iloc[-1] * (1.0 + value)
 
     return df.drop(columns=list(cols))

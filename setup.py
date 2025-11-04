@@ -23,7 +23,7 @@ def install_requires() -> typing.List[str]:
 
 setup(
     name='panelbeater',
-    version='0.0.3',
+    version='0.0.4',
     description='A CLI for finding mispriced options.',
     long_description=long_description,
     long_description_content_type='text/markdown',

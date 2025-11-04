@@ -52,24 +52,29 @@ _DAYS_OUT = 30
 
 def main() -> None:
     """The main CLI function."""
+    # Setup main objects
     session = requests_cache.CachedSession("panelbeater-cache")
     wavetrainer = wt.create(
         "panelbeater-train",
         walkforward_timedelta=datetime.timedelta(days=7),
         validation_size=datetime.timedelta(days=365),
-        test_size=datetime.timedelta(days=365),
+        test_size=datetime.timedelta(days=7),
         allowed_models={"catboost"},
         max_false_positive_reduction_steps=0,
     )
+
+    # Fit the models
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
     df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
     df_y_norm = normalize(df=df_y.copy())
+    wavetrainer.fit(df_x, y=df_y_norm)
     for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
-        wavetrainer.fit(df_x, y=df_y_norm)
         df_next = wavetrainer.transform(df_y_norm)
-        df_next = denormalize(df_next)
-        df_x = features(df=df_next.copy(), windows=_WINDOWS, lags=_LAGS)
-        df_y_norm = normalize(df=df_next.copy())
+        df_y = denormalize(df_next)
+        df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
+        df_y_norm = normalize(df=df_y.copy())
+
+    # Find the current options prices
 
 
 if __name__ == "__main__":
