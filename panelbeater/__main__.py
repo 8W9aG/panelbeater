@@ -1,5 +1,6 @@
 """The CLI for finding mispriced options."""
 
+import argparse
 import datetime
 
 import requests_cache
@@ -52,6 +53,16 @@ _DAYS_OUT = 30
 
 def main() -> None:
     """The main CLI function."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--inference",
+        help="Whether to skip training and just do inference.",
+        required=False,
+        default=False,
+        action="store_true",
+    )
+    args = parser.parse_args()
+
     # Setup main objects
     session = requests_cache.CachedSession("panelbeater-cache")
     wavetrainer = wt.create(
@@ -67,7 +78,8 @@ def main() -> None:
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
     df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
     df_y_norm = normalize(df=df_y.copy())
-    wavetrainer.fit(df_x, y=df_y_norm)
+    if not args.inference:
+        wavetrainer.fit(df_x, y=df_y_norm)
     for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
         df_next = wavetrainer.transform(df_y_norm)
         df_y = denormalize(df_next)
