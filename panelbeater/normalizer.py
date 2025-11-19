@@ -34,22 +34,22 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(dfs, axis=1)
 
 
-def denormalize(df: pd.DataFrame) -> pd.DataFrame:
+def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
     """Denormalize the dataframe back to a total value."""
+    for col in y.columns:
+        df[col] = y[col]
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())
-    target_cols = {"_".join(x.split("_")[:-2]) for x in cols}
+    target_cols = {"_".join(x.split("_")[:2]) for x in cols}
     for col in target_cols:
-        df[col] = None
-
         # Find the standard deviations
         z_cols = {x for x in cols if x.startswith(col)}
         stds = sorted(
             [
-                float(x.replace(col, "").split("_")[2])
+                float(x.replace(col, "").split("_")[1])
                 for x in z_cols
-                if _is_float(x.replace(col, "").split("_")[2])
+                if _is_float(x.replace(col, "").split("_")[1])
             ]
         )
 
