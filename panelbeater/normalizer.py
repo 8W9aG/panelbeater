@@ -39,7 +39,7 @@ def denormalize(df: pd.DataFrame) -> pd.DataFrame:
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())
-    target_cols = {x for x in cols if "_".join(x.split("_")[:-1])}
+    target_cols = {"_".join(x.split("_")[:-2]) for x in cols}
     for col in target_cols:
         df[col] = None
 
