@@ -44,7 +44,9 @@ def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
     target_cols = {"_".join(x.split("_")[:2]) for x in cols}
     for col in target_cols:
         # Find the standard deviations
-        z_cols = {x for x in cols if x.startswith(col)}
+        z_cols = {x for x in cols if x.startswith(col) and x != col}
+        if not z_cols:
+            continue
         stds = sorted(
             [
                 float(x.replace(col, "").split("_")[1])

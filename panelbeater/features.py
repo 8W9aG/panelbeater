@@ -51,4 +51,4 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     df = _ticker_features(df=df, windows=windows)
     df = _meta_ticker_feature(df, lags=lags, windows=windows)
     df = _dt_features(df=df)
-    return df.drop(columns=cols)
+    return df.drop(columns=cols).shift(1)
