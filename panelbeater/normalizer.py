@@ -47,9 +47,9 @@ def denormalize(df: pd.DataFrame) -> pd.DataFrame:
         z_cols = {x for x in cols if x.startswith(col)}
         stds = sorted(
             [
-                float(x.replace(col, "").split("_")[1])
+                float(x.replace(col, "").split("_")[2])
                 for x in z_cols
-                if _is_float(x.replace(col, "").split("_")[1])
+                if _is_float(x.replace(col, "").split("_")[2])
             ]
         )
 
