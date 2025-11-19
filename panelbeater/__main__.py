@@ -81,7 +81,7 @@ def main() -> None:
     if not args.inference:
         wavetrainer.fit(df_x, y=df_y_norm)
     for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
-        df_next = wavetrainer.transform(df_x)
+        df_next = wavetrainer.transform(df_x, ignore_no_dates=True)
         df_y = denormalize(df_next)
         df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
         df_y_norm = normalize(df=df_y.copy())

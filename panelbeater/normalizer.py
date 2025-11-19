@@ -10,6 +10,14 @@ import tqdm
 from wavetrainer.model.model import PROBABILITY_COLUMN_PREFIX
 
 
+def _is_float(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize the dataframe per column by z-score bucketing."""
     df = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
@@ -37,7 +45,13 @@ def denormalize(df: pd.DataFrame) -> pd.DataFrame:
 
         # Find the standard deviations
         z_cols = {x for x in cols if x.startswith(col)}
-        stds = sorted([float(x.replace(col, "").split("_")[1]) for x in z_cols])
+        stds = sorted(
+            [
+                float(x.replace(col, "").split("_")[1])
+                for x in z_cols
+                if _is_float(x.replace(col, "").split("_")[1])
+            ]
+        )
 
         # Find the highest probability standard deviation
         highest_std_value = 0.0
