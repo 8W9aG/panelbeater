@@ -6,6 +6,7 @@ import datetime
 import requests_cache
 import tqdm
 import wavetrainer as wt
+from wavetrainer.model_type import QUANTILE_KEY
 
 from .download import download
 from .features import features
@@ -78,6 +79,7 @@ def main() -> None:
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
     df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
     df_y_norm = normalize(df=df_y.copy())
+    df_y_norm.attrs = {QUANTILE_KEY: True}
     if not args.inference:
         wavetrainer.fit(df_x, y=df_y_norm)
     for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
