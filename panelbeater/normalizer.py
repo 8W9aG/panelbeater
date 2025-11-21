@@ -2,11 +2,8 @@
 
 # pylint: disable=too-many-locals
 
-import math
-
 import numpy as np
 import pandas as pd
-import tqdm
 from wavetrainer.model.model import PROBABILITY_COLUMN_PREFIX
 
 
@@ -23,15 +20,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
     mu = df.rolling(365).mean()
     sigma = df.rolling(365).std()
-    df = ((((df - mu) / sigma) * 2.0).round() / 2.0).clip(-3, 3)
-    dfs = []
-    for col in tqdm.tqdm(df.columns, desc="Normalising targets"):
-        for unique_val in df[col].unique():
-            if math.isnan(unique_val):
-                continue
-            s = (df[col] == unique_val).rename(f"{col}_{unique_val}")
-            dfs.append(s)
-    return pd.concat(dfs, axis=1)
+    return (df - mu) / sigma
 
 
 def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
