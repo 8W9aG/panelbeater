@@ -1,3 +1,3 @@
 """panelbeater initialisation."""
 
-__VERSION__ = "0.0.15"
+__VERSION__ = "0.0.16"
