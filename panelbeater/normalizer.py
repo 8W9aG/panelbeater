@@ -20,7 +20,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
     mu = df.rolling(365).mean()
     sigma = df.rolling(365).std()
-    return ((df - mu) / sigma).fillna(0.0)
+    return ((df - mu) / sigma).fillna(0.0).clip(-3.0, 3.0)
 
 
 def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
