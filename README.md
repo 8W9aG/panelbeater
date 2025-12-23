@@ -19,6 +19,11 @@ Python 3.11.6:
 - [scikit-learn](https://scikit-learn.org/stable/)
 - [wavetrainer](https://github.com/8W9aG/wavetrainer/)
 - [tqdm](https://tqdm.github.io/)
+- [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)
+- [python-dotenv](https://saurabh-kumar.com/python-dotenv/)
+- [kaleido](https://github.com/plotly/kaleido)
+- [plotly](https://plotly.com/)
+- [scipy](https://scipy.org/)
 
 ## Raison D'être :thought_balloon:
 
@@ -29,7 +34,7 @@ Python 3.11.6:
 `panelbeater` goes through the following steps:
 1. Downloads the historical data.
 2. Performs feature engineering on the data.
-3. Trains the required models to operate on the data panel.
+3. Trains the required models and copulas to operate on the data panel.
 4. Downloads the current data.
 5. Runs inference on t+X for the latest options to find the probability distribution on the asset prices to their expiry dates.
 6. Finds any mispriced options and size the position accordingly.

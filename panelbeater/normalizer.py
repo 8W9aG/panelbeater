@@ -5,7 +5,6 @@ import math
 
 import numpy as np
 import pandas as pd
-import tqdm
 from wavetrainer.model.model import PROBABILITY_COLUMN_PREFIX
 
 
@@ -24,7 +23,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     sigma = df.rolling(365).std()
     df = ((((df - mu) / sigma) * 2.0).round() / 2.0).clip(-3, 3)
     dfs = []
-    for col in tqdm.tqdm(df.columns, desc="Normalising targets"):
+    for col in df.columns:
         for unique_val in df[col].unique():
             if math.isnan(unique_val):
                 continue
@@ -33,19 +32,26 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(dfs, axis=1)
 
 
-def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
+def denormalize(
+    df: pd.DataFrame, y: pd.DataFrame, u_sample: np.ndarray | None = None
+) -> pd.DataFrame:
     """Denormalize the dataframe back to a total value."""
+    df = df.reindex(y.index)
     for col in y.columns:
         df[col] = y[col]
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())
     target_cols = {"_".join(x.split("_")[:2]) for x in cols}
+    asset_idx = 0
     for col in target_cols:
-        # Find the standard deviations
+        # 1. Gather all predicted probabilities for this asset's buckets
         z_cols = {x for x in cols if x.startswith(col) and x != col}
         if not z_cols:
             continue
+        historical_series = y[col].pct_change().dropna()
+
+        # Sort buckets (stds) and their associated probabilities
         stds = sorted(
             [
                 float(x.replace(col, "").split("_")[1])
@@ -53,22 +59,33 @@ def denormalize(df: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
                 if _is_float(x.replace(col, "").split("_")[1])
             ]
         )
-
-        # Find the highest probability standard deviation
-        highest_std_value = 0.0
-        highest_std = None
+        probs = []
         for std in stds:
             std_suffix = f"{col}_{std}_{PROBABILITY_COLUMN_PREFIX}"
-            std_true_col = sorted([x for x in cols if x.startswith(std_suffix)])[-1]
-            std_value = df[std_true_col].iloc[-1]
-            if std_value > highest_std_value:
-                highest_std_value = std_value
-                highest_std = std
+            prob_col = sorted([x for x in cols if x.startswith(std_suffix)])[-1]
+            prob = df[prob_col].dropna().iloc[-1]
+            probs.append(prob)
 
-        # Convert the standard deviation back to a value
-        mu = df[col].rolling(365).mean()
-        sigma = df[col].rolling(365).std()
-        value = (highest_std * sigma) + mu
-        df.loc[date_to_add, col] = df[col].iloc[-1] * (1.0 + value)
+        # Normalize probabilities (ensure they sum to 1.0)
+        probs = np.array(probs) / np.sum(probs)
 
-    return df.drop(columns=list(cols))
+        # 2. Select the bucket using Inverse Transform Sampling
+        highest_std = 0.0
+        if u_sample is not None and asset_idx < len(u_sample):
+            cumulative_probs = np.cumsum(probs)
+            idx = np.searchsorted(cumulative_probs, u_sample[asset_idx])
+            highest_std = stds[min(idx, len(stds) - 1)]
+            asset_idx += 1
+        else:
+            highest_std = np.random.choice(stds, p=probs)
+
+        # 3. Use Pandas rolling on the historical y dataframe to avoid ndarray errors
+        mu = float(historical_series.rolling(365).mean().fillna(0.0).iloc[-1])  # pyright: ignore
+        sigma = float(historical_series.rolling(365).std().fillna(0.0).iloc[-1])
+
+        value = 0.0
+        if highest_std != 0.0:
+            value = (highest_std * sigma) + mu
+        df.loc[date_to_add, col] = y[col].iloc[-1] * (1.0 + value)
+
+    return df[sorted(target_cols)]  # pyright: ignore

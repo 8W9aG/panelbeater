@@ -4,13 +4,12 @@ import warnings
 
 import numpy as np
 import pandas as pd
-import tqdm
 from feature_engine.datetime import DatetimeFeatures
 
 
 def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     cols = df.columns.values.tolist()
-    for col in tqdm.tqdm(cols, desc="Generating ticker features"):
+    for col in cols:
         s = df[col]
         for w in windows:
             with warnings.catch_warnings():
@@ -31,16 +30,15 @@ def _meta_ticker_feature(
     df: pd.DataFrame, lags: list[int], windows: list[int]
 ) -> pd.DataFrame:
     dfs = [df]
-    for lag in tqdm.tqdm(lags, desc="Generating lags"):
+    for lag in lags:
         dfs.append(df.shift(lag).add_suffix(f"_lag{lag}"))
-    for window in tqdm.tqdm(windows, desc="Generating window features"):
+    for window in windows:
         dfs.append(df.rolling(window).mean().add_suffix(f"_rmean{window}"))  # type: ignore
         dfs.append(df.rolling(window).std().add_suffix(f"_rstd{window}"))  # type: ignore
     return pd.concat(dfs, axis=1).replace([np.inf, -np.inf], np.nan)
 
 
 def _dt_features(df: pd.DataFrame) -> pd.DataFrame:
-    print("Generating datetime features")
     dtf = DatetimeFeatures(features_to_extract="all", variables="index")
     return dtf.fit_transform(df)
 

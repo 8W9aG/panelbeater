@@ -1,11 +1,23 @@
 """Download historical data."""
 
+# pylint: disable=invalid-name,global-statement,unused-argument
+import os
+
 import numpy as np
 import pandas as pd
 import requests_cache
 import tqdm
 import yfinance as yf
-from pandas_datareader import data as fred
+from fredapi import Fred  # type: ignore
+
+_FRED_CLIENT = None
+
+
+def _get_fred_client() -> Fred:
+    global _FRED_CLIENT
+    if _FRED_CLIENT is None:
+        _FRED_CLIENT = Fred(api_key=os.environ["FRED_API_KEY"])
+    return _FRED_CLIENT
 
 
 def _load_yahoo_prices(tickers: list[str]) -> pd.DataFrame:
@@ -35,11 +47,32 @@ def _load_fred_series(
     codes: list[str], session: requests_cache.CachedSession
 ) -> pd.DataFrame:
     """Load FRED series, forward-fill to daily to align with markets."""
-    dfs = []
+    client = _get_fred_client()
+    dfs: list[pd.Series] = []
     for code in tqdm.tqdm(codes, desc="Downloading macros"):
-        s = fred.DataReader(code, "fred", start="2000-01-01", session=session)
-        s.columns = [code]
-        dfs.append(s)
+        try:
+            df = client.get_series_all_releases(code)
+            df["date"] = pd.to_datetime(df["date"])
+            df["realtime_start"] = pd.to_datetime(df["realtime_start"])
+
+            def select_latest(group: pd.DataFrame) -> pd.DataFrame:
+                latest_df = group[
+                    group["realtime_start"] == group["realtime_start"].max()
+                ]
+                if not isinstance(latest_df, pd.DataFrame):
+                    raise ValueError("latest_df is not a DataFrame")
+                return latest_df
+
+            df = df.groupby("date").apply(select_latest)
+            df = df.set_index("date")
+            df.index = df.index.date  # type: ignore
+            df = df.sort_index()
+            dfs.append(df["value"].rename(code))  # type: ignore
+        except ValueError:
+            df = client.get_series(code)
+            df.index = df.index.date  # type: ignore
+            df = df.sort_index()
+            dfs.append(df.rename(code))
     macro = pd.concat(dfs, axis=1).sort_index()
     # daily frequency with forward-fill (macro is slower cadence)
     macro = macro.asfreq("D").ffill()
@@ -63,4 +96,5 @@ def download(
     levels = pd.concat(
         [prices.add_prefix("PX_"), macro.add_prefix("MACRO_")], axis=1
     ).ffill()
+    print(levels)
     return levels.replace([np.inf, -np.inf], np.nan)
