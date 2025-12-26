@@ -20,7 +20,7 @@ _TICKERS = [
     # Equities
     "SPY",
     "QQQ",
-    # "EEM",
+    "EEM",
     # Commodities
     # "GC=F",
     # "CL=F",
@@ -35,7 +35,7 @@ _TICKERS = [
 _MACROS = [
     "GDP",
     "UNRATE",
-    # "CPIAUCSL",
+    "CPIAUCSL",
     # "FEDFUNDS",
     # "DGS10",
     # "T10Y2Y",
@@ -141,6 +141,7 @@ def main() -> None:
 
     # Find the current options prices
     for ticker in _TICKERS:
+        print(f"Finding pricing options for {ticker}")
         find_mispriced_options(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
 
 

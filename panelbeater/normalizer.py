@@ -83,9 +83,10 @@ def denormalize(
         mu = float(historical_series.rolling(365).mean().fillna(0.0).iloc[-1])  # pyright: ignore
         sigma = float(historical_series.rolling(365).std().fillna(0.0).iloc[-1])
 
-        value = 0.0
-        if highest_std != 0.0:
-            value = (highest_std * sigma) + mu
+        lower_bound = highest_std - 0.25
+        upper_bound = highest_std + 0.25
+        jittered_std = np.random.uniform(lower_bound, upper_bound)
+        value = (jittered_std * sigma) + mu
         df.loc[date_to_add, col] = y[col].iloc[-1] * (1.0 + value)
 
     return df[sorted(target_cols)]  # pyright: ignore

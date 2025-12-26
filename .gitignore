@@ -211,6 +211,6 @@ __marimo__/
 panelbeater-train
 *.parquet
 catboost_info
-market_structure.json
+market_structure*.json
 monte_carlo*.png
 kelly_conviction*.png
