@@ -22,7 +22,7 @@ _TICKERS = [
     "QQQ",
     "EEM",
     # Commodities
-    # "GC=F",
+    "GC=F",
     # "CL=F",
     # "SI=F",
     # FX
@@ -36,7 +36,7 @@ _MACROS = [
     "GDP",
     "UNRATE",
     "CPIAUCSL",
-    # "FEDFUNDS",
+    "FEDFUNDS",
     # "DGS10",
     # "T10Y2Y",
     # "M2SL",
