@@ -14,7 +14,7 @@ from .copula import fit_vine_copula, sample_joint_step
 from .download import download
 from .features import features
 from .normalizer import denormalize, normalize
-from .options import find_mispriced_options
+from .options import determine_spot_position, find_mispriced_options
 
 _TICKERS = [
     # Equities
@@ -23,7 +23,7 @@ _TICKERS = [
     "EEM",
     # Commodities
     "GC=F",
-    # "CL=F",
+    "CL=F",
     # "SI=F",
     # FX
     # "EURUSD=X",
@@ -37,7 +37,7 @@ _MACROS = [
     "UNRATE",
     "CPIAUCSL",
     "FEDFUNDS",
-    # "DGS10",
+    "DGS10",
     # "T10Y2Y",
     # "M2SL",
     # "VIXCLS",
@@ -92,17 +92,21 @@ def main() -> None:
         returns = returns.to_frame()
     vine_cop = fit_vine_copula(returns)
 
-    # Simulate the paths
-    all_sims = []
+    # Train the models
     original_df_y = df_y.copy()
-    for sim_idx in tqdm.tqdm(range(_SIMS), desc="Simulations"):
-        u_step = sample_joint_step(vine_cop)
+    if not args.inference:
         df_x = features(df=original_df_y.copy(), windows=_WINDOWS, lags=_LAGS)
         df_y_norm = normalize(df=original_df_y.copy())
-        if not args.inference and sim_idx == 0:
-            wavetrainer.fit(df_x, y=df_y_norm)
+        wavetrainer.fit(df_x, y=df_y_norm)
+
+    # Simulate the paths
+    all_sims = []
+    for sim_idx in tqdm.tqdm(range(_SIMS), desc="Simulations"):
+        df_x = features(df=original_df_y.copy(), windows=_WINDOWS, lags=_LAGS)
+        df_y_norm = normalize(df=original_df_y.copy())
         df_y = original_df_y.copy()
         for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
+            u_step = sample_joint_step(vine_cop)
             df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
                 columns=df_x.columns.values.tolist()
             )
@@ -133,7 +137,7 @@ def main() -> None:
             x=plot_df.index,
             y=plot_df.median(axis=1),
             name="Median",
-            line=dict(color="white", width=3),
+            line=dict(color="white", width=10),
         )
         fig.write_image(
             f"monte_carlo_results_{col}.png", width=1200, height=800, scale=2
@@ -143,6 +147,7 @@ def main() -> None:
     for ticker in _TICKERS:
         print(f"Finding pricing options for {ticker}")
         find_mispriced_options(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
+        determine_spot_position(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
 
 
 if __name__ == "__main__":

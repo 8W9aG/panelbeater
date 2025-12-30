@@ -167,6 +167,9 @@ def find_mispriced_options(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
     comparison_df = pd.DataFrame(date_results)
     # Apply the calculation
     results = comparison_df.apply(lambda row: calculate_full_kelly(row, sim_df), axis=1)
+    if results.empty:
+        return
+
     comparison_df[["kelly_fraction", "expected_profit"]] = pd.DataFrame(
         results.tolist(), index=comparison_df.index
     )
@@ -265,3 +268,58 @@ def find_mispriced_options(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
 
     exit_df = pd.DataFrame(exit_strategies)
     print(exit_df)
+
+
+def determine_spot_position(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
+    """
+    Determines optimal spot position (Long/Short), Kelly sizing,
+    and path-based exit levels for assets without options.
+    """
+    # 1. Get Current Market Data
+    ticker = yf.Ticker(ticker_symbol)
+    spot_price = ticker.history(period="1d")["Close"].iloc[-1]
+
+    # Use the final row of simulation to determine the terminal distribution
+    terminal_prices = sim_df.iloc[-1].values
+
+    # 2. Determine Bias and Winning Path Ratio (p)
+    # Long if median is above spot; Short if median is below spot
+    median_terminal = np.median(terminal_prices)
+    is_long = median_terminal > spot_price
+
+    if is_long:
+        p = np.mean(terminal_prices > spot_price)  # Probability of profit
+        tp_price = np.quantile(terminal_prices, 0.95)  # 95th percentile target
+        sl_price = np.quantile(terminal_prices, 0.05)  # 5th percentile stop
+    else:
+        p = np.mean(terminal_prices < spot_price)
+        tp_price = np.quantile(terminal_prices, 0.05)
+        sl_price = np.quantile(terminal_prices, 0.95)
+
+    # 3. Calculate Odds (b) for Kelly
+    # b = (Expected Profit) / (Expected Loss if Stopped)
+    expected_profit = abs(tp_price - spot_price)
+    expected_loss = abs(spot_price - sl_price)
+    b = expected_profit / expected_loss
+
+    # 4. Full Kelly Formula: f* = (p(b+1) - 1) / b
+    if b > 0 and p > 0:
+        f_star = (p * (b + 1) - 1) / b
+        kelly_size = max(0, f_star)
+    else:
+        kelly_size = 0
+
+    # 5. Apply a 'Trader's Cap' (e.g., 10% of portfolio for spot)
+    final_size = min(kelly_size, 0.10)
+
+    # Output Results
+    print(f"\n--- SPOT ANALYSIS FOR {ticker_symbol} ---")
+    print(f"Current Price: ${spot_price:.2f}")
+    print(f"Position: {'LONG' if is_long else 'SHORT'}")
+    print(f"Win Probability (p): {p:.1%}")
+    print(f"Risk/Reward Ratio (b): {b:.2f}")
+    print(f"Kelly Fraction: {kelly_size:.2%}")
+    print(f"Recommended Size (Capped): {final_size:.2%}")
+    print("-" * 30)
+    print(f"Take Profit Target: ${tp_price:.2f}")
+    print(f"Stop Loss (Invalidation): ${sl_price:.2f}")
