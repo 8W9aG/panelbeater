@@ -9,8 +9,6 @@ import numpy as np
 import pandas as pd
 import pyvinecopulib as pv
 
-VINE_FILE = "market_structure.json"
-
 
 def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
     """
@@ -40,6 +38,19 @@ def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
     )
 
     cop = pv.Vinecop.from_data(u, controls=controls)
+
+    # --- TAMING LOGIC START ---
+    min_df = 15.0  # Set this based on your risk appetite
+    for t in range(cop.trunc_lvl):
+        for e in range(cop.dim - 1 - t):
+            bicop = cop.get_pair_copula(t, e)
+            if bicop.family == pv.BicopFamily.student:  # type: ignore
+                p = bicop.parameters
+                if p[0, 1] < min_df:
+                    p[0, 1] = min_df
+                    bicop.parameters = p
+                    cop.set_pair_copula(t, e, bicop)  # type: ignore
+    # --- TAMING LOGIC END ---
 
     # 3. Save for future runs
     with open(vine_file, "w", encoding="utf8") as f:

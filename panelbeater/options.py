@@ -219,28 +219,39 @@ def find_mispriced_options(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
         # Select appropriate simulation slices
         sim_slice = sim_df.loc[trade["date"]]
 
-        # --- ADJUSTED LOGIC START ---
+        # Calculate distribution stats for this specific expiry
+        mu = sim_slice.mean()
+        sigma = sim_slice.std()
+
+        # --- REASONABLE LOGIC START ---
+        # Instead of 95/5, use 0.5 to 1.0 standard deviation for targets
+        # This targets the 'meat' of the move your model predicts
         if trade["type"] == "call":
-            # Call: Profit on upside (95th percentile), Stop on downside (5th percentile)
-            tp_price = sim_slice.quantile(0.95)
-            sl_price = sim_slice.quantile(0.05)
+            # TP: The mean predicted price (where the bulk of the probability lies)
+            # SL: Half a standard deviation below the current spot or the mean
+            tp_price = mu + (0.2 * sigma)
+            sl_price = mu - (0.5 * sigma)
         else:
-            # Put: Profit on downside (5th percentile), Stop on upside (95th percentile)
-            tp_price = sim_slice.quantile(0.05)
-            sl_price = sim_slice.quantile(0.95)
-        # --- ADJUSTED LOGIC END ---
+            # Put: Profit on the downside mean
+            tp_price = mu - (0.2 * sigma)
+            sl_price = mu + (0.5 * sigma)
+        # --- REASONABLE LOGIC END ---
 
         # 1. Get today's date and calculate time to expiry
         today = datetime.now()
         expiry_date = datetime.strptime(trade["date"], "%Y-%m-%d")  # type: ignore
         days_remaining = (expiry_date - today).days
-        time_to_expiry = max(days_remaining, 0.5) / 365.0
 
-        # Calculate the Black-Scholes prices for the options at these triggers
+        # IMPORTANT: Exit triggers should be modeled for 'Today' or 'Soon',
+        # not the moment of expiry, otherwise extrinsic value is 0.
+        # We assume we hold for 25% of the remaining duration or at least 1 day.
+        holding_period_days = max(days_remaining * 0.25, 1)
+        time_to_trigger = max(days_remaining - holding_period_days, 0.5) / 365.0
+
         tp_option_price = black_scholes_price(
             tp_price,
             trade["strike"],
-            time_to_expiry,
+            time_to_trigger,
             0.04,
             trade["market_iv"],
             str(trade["type"]),
@@ -248,7 +259,7 @@ def find_mispriced_options(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
         sl_option_price = black_scholes_price(
             sl_price,
             trade["strike"],
-            time_to_expiry,
+            time_to_trigger,
             0.04,
             trade["market_iv"],
             str(trade["type"]),
