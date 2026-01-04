@@ -1,5 +1,6 @@
 """Handle joint distributions."""
 
+# pylint: disable=too-many-locals,pointless-string-statement
 import json
 import os
 import time
@@ -40,16 +41,26 @@ def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
     cop = pv.Vinecop.from_data(u, controls=controls)
 
     # --- TAMING LOGIC START ---
+    """
     min_df = 15.0  # Set this based on your risk appetite
     for t in range(cop.trunc_lvl):
         for e in range(cop.dim - 1 - t):
             bicop = cop.get_pair_copula(t, e)
+
             if bicop.family == pv.BicopFamily.student:  # type: ignore
-                p = bicop.parameters
-                if p[0, 1] < min_df:
-                    p[0, 1] = min_df
-                    bicop.parameters = p
+                p = bicop.parameters.flatten()  # Flatten to ensure 1D access
+
+                # Index 0 is Rho (correlation), Index 1 is Nu (Degrees of Freedom)
+                current_rho = p[0]
+                current_df = p[1]
+
+                if current_df < min_df:
+                    # Create a new array with the same correlation but higher DF
+                    new_params = np.array([[current_rho, min_df]])
+                    bicop.parameters = new_params
                     cop.set_pair_copula(t, e, bicop)  # type: ignore
+                    print(f"Tamed Tree {t + 1}, Edge {e + 1}: DF bumped to {min_df}")
+    """
     # --- TAMING LOGIC END ---
 
     # 3. Save for future runs

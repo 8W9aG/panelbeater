@@ -1,14 +1,16 @@
 """The CLI for finding mispriced options."""
 
-# pylint: disable=too-many-locals,use-dict-literal
+# pylint: disable=too-many-locals,use-dict-literal,invalid-name
 import argparse
 import datetime
+import warnings
 
 import pandas as pd
 import requests_cache
 import tqdm
 import wavetrainer as wt
 from dotenv import load_dotenv
+from joblib import Parallel, delayed
 
 from .copula import fit_vine_copula, sample_joint_step
 from .download import download
@@ -24,7 +26,7 @@ _TICKERS = [
     # Commodities
     "GC=F",
     "CL=F",
-    # "SI=F",
+    "SI=F",
     # FX
     # "EURUSD=X",
     # "USDJPY=X",
@@ -38,7 +40,7 @@ _MACROS = [
     "CPIAUCSL",
     "FEDFUNDS",
     "DGS10",
-    # "T10Y2Y",
+    "T10Y2Y",
     # "M2SL",
     # "VIXCLS",
     # "DTWEXBGS",
@@ -56,6 +58,34 @@ _LAGS = [1, 3, 5, 10, 20, 30]
 _DAYS_OUT = 30
 _SIMS = 1000
 _SIMULATION_COLUMN = "simulation"
+
+
+def run_single_simulation(
+    sim_idx, original_df_y, vine_cop, wavetrainer, _DAYS_OUT, _WINDOWS, _LAGS
+):
+    """
+    Encapsulates a single Monte Carlo path generation.
+    """
+    # Local copies for thread-safety (though joblib uses processes)
+    df_y = original_df_y.copy()
+
+    for _ in range(_DAYS_OUT):
+        # 1. Feature Engineering
+        df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
+
+        # 2. Get Model Prediction (u_step sample from Copula)
+        u_step = sample_joint_step(vine_cop)
+
+        # 3. Transform and Denormalize to get next day prices
+        df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
+            columns=df_x.columns.values.tolist()
+        )
+        df_y = denormalize(df_next, y=df_y.copy(), u_sample=u_step)
+
+    # Mark the simulation index and return only the relevant tail (for memory efficiency)
+    df_result = df_y.tail(_DAYS_OUT + 1).copy()
+    df_result[_SIMULATION_COLUMN] = sim_idx
+    return df_result
 
 
 def main() -> None:
@@ -80,6 +110,7 @@ def main() -> None:
         test_size=datetime.timedelta(days=365),
         allowed_models={"catboost"},
         max_false_positive_reduction_steps=0,
+        use_power_transformer=True,
     )
 
     # Fit the models
@@ -97,28 +128,22 @@ def main() -> None:
     if not args.inference:
         df_x = features(df=original_df_y.copy(), windows=_WINDOWS, lags=_LAGS)
         df_y_norm = normalize(df=original_df_y.copy())
-        wavetrainer.fit(df_x, y=df_y_norm)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            wavetrainer.fit(df_x, y=df_y_norm)
 
-    # Simulate the paths
-    all_sims = []
-    for sim_idx in tqdm.tqdm(range(_SIMS), desc="Simulations"):
-        df_x = features(df=original_df_y.copy(), windows=_WINDOWS, lags=_LAGS)
-        df_y_norm = normalize(df=original_df_y.copy())
-        df_y = original_df_y.copy()
-        for _ in tqdm.tqdm(range(_DAYS_OUT), desc="Running t+X simulation"):
-            u_step = sample_joint_step(vine_cop)
-            df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
-                columns=df_x.columns.values.tolist()
-            )
-            df_y = denormalize(df_next, y=df_y.copy(), u_sample=u_step)
-            df_x = features(df=df_y.copy(), windows=_WINDOWS, lags=_LAGS)
-            df_y_norm = normalize(df=df_y.copy())
-        df_y[_SIMULATION_COLUMN] = sim_idx
-        print(df_y.tail(_DAYS_OUT + 1))
-        all_sims.append(df_y.copy())
+    print(f"Starting {_SIMS} simulations in parallel...")
+
+    # n_jobs=-1 uses all available CPU cores
+    all_sims = Parallel(n_jobs=-1)(
+        delayed(run_single_simulation)(
+            i, original_df_y, vine_cop, wavetrainer, _DAYS_OUT, _WINDOWS, _LAGS
+        )
+        for i in tqdm.tqdm(range(_SIMS), desc="Simulating")
+    )
 
     # Combine all simulations into one large DataFrame
-    df_mc = pd.concat(all_sims)
+    df_mc = pd.concat(all_sims)  # type: ignore
     pd.options.plotting.backend = "plotly"
     for col in tqdm.tqdm(df_y.columns.values.tolist(), desc="Plotting assets"):
         if col == _SIMULATION_COLUMN:

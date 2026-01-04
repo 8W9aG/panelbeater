@@ -24,6 +24,7 @@ Python 3.11.6:
 - [kaleido](https://github.com/plotly/kaleido)
 - [plotly](https://plotly.com/)
 - [scipy](https://scipy.org/)
+- [joblib](https://joblib.readthedocs.io/en/stable/)
 
 ## Raison D'être :thought_balloon:
 

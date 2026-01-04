@@ -291,21 +291,22 @@ def determine_spot_position(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
     spot_price = ticker.history(period="1d")["Close"].iloc[-1]
 
     # Use the final row of simulation to determine the terminal distribution
-    terminal_prices = sim_df.iloc[-1].values
+    terminal_prices = sim_df.iloc[-1]
+    print(terminal_prices)
 
     # 2. Determine Bias and Winning Path Ratio (p)
     # Long if median is above spot; Short if median is below spot
-    median_terminal = np.median(terminal_prices)
+    median_terminal = terminal_prices.median()
     is_long = median_terminal > spot_price
 
     if is_long:
-        p = np.mean(terminal_prices > spot_price)  # Probability of profit
-        tp_price = np.quantile(terminal_prices, 0.95)  # 95th percentile target
-        sl_price = np.quantile(terminal_prices, 0.05)  # 5th percentile stop
+        p = terminal_prices.mean() > spot_price  # Probability of profit
+        tp_price = terminal_prices.quantile(0.95)  # 95th percentile target
+        sl_price = terminal_prices.quantile(0.05)  # 5th percentile stop
     else:
         p = np.mean(terminal_prices < spot_price)
-        tp_price = np.quantile(terminal_prices, 0.05)
-        sl_price = np.quantile(terminal_prices, 0.95)
+        tp_price = terminal_prices.quantile(0.05)
+        sl_price = terminal_prices.quantile(0.95)
 
     # 3. Calculate Odds (b) for Kelly
     # b = (Expected Profit) / (Expected Loss if Stopped)
