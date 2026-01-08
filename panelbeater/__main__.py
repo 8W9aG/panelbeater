@@ -2,21 +2,20 @@
 
 # pylint: disable=too-many-locals,use-dict-literal,invalid-name
 import argparse
-import datetime
-import warnings
 
 import pandas as pd
 import requests_cache
 import tqdm
-import wavetrainer as wt
 from dotenv import load_dotenv
 from joblib import Parallel, delayed
 
-from .copula import fit_vine_copula, sample_joint_step
+from .copula import load_vine_copula, sample_joint_step
 from .download import download
 from .features import features
-from .normalizer import denormalize, normalize
+from .fit import fit
+from .normalizer import denormalize
 from .options import determine_spot_position, find_mispriced_options
+from .wt import create_wt
 
 _TICKERS = [
     # Equities
@@ -60,14 +59,14 @@ _SIMS = 1000
 _SIMULATION_COLUMN = "simulation"
 
 
-def run_single_simulation(
-    sim_idx, original_df_y, vine_cop, wavetrainer, _DAYS_OUT, _WINDOWS, _LAGS
-):
+def run_single_simulation(sim_idx, df_y, _DAYS_OUT, _WINDOWS, _LAGS):
     """
     Encapsulates a single Monte Carlo path generation.
     """
     # Local copies for thread-safety (though joblib uses processes)
-    df_y = original_df_y.copy()
+    df_y = df_y.copy()
+    vine_cop = load_vine_copula(df_returns=df_y)
+    wavetrainer = create_wt()
 
     for _ in range(_DAYS_OUT):
         # 1. Feature Engineering
@@ -94,85 +93,68 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--inference",
-        help="Whether to skip training and just do inference.",
+        help="Whether to do inference.",
         required=False,
-        default=False,
-        action="store_true",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--train",
+        help="Whether to do training.",
+        required=False,
+        default=True,
+        action=argparse.BooleanOptionalAction,
     )
     args = parser.parse_args()
 
     # Setup main objects
     session = requests_cache.CachedSession("panelbeater-cache")
-    wavetrainer = wt.create(
-        "panelbeater-train",
-        walkforward_timedelta=datetime.timedelta(days=30),
-        validation_size=datetime.timedelta(days=365),
-        test_size=datetime.timedelta(days=365),
-        allowed_models={"catboost"},
-        max_false_positive_reduction_steps=0,
-        use_power_transformer=True,
-    )
 
     # Fit the models
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
+    if args.train:
+        fit(df_y=df_y, windows=_WINDOWS, lags=_LAGS)
 
-    # Fit Vine Copula on historical returns
-    # We use pct_change to capture the dependency of returns
-    returns = df_y.pct_change().dropna()
-    if isinstance(returns, pd.Series):
-        returns = returns.to_frame()
-    vine_cop = fit_vine_copula(returns)
+    if args.inference:
+        print(f"Starting {_SIMS} simulations in parallel...")
 
-    # Train the models
-    original_df_y = df_y.copy()
-    if not args.inference:
-        df_x = features(df=original_df_y.copy(), windows=_WINDOWS, lags=_LAGS)
-        df_y_norm = normalize(df=original_df_y.copy())
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            wavetrainer.fit(df_x, y=df_y_norm)
-
-    print(f"Starting {_SIMS} simulations in parallel...")
-
-    # n_jobs=-1 uses all available CPU cores
-    all_sims = Parallel(n_jobs=-1)(
-        delayed(run_single_simulation)(
-            i, original_df_y, vine_cop, wavetrainer, _DAYS_OUT, _WINDOWS, _LAGS
-        )
-        for i in tqdm.tqdm(range(_SIMS), desc="Simulating")
-    )
-
-    # Combine all simulations into one large DataFrame
-    df_mc = pd.concat(all_sims)  # type: ignore
-    pd.options.plotting.backend = "plotly"
-    for col in tqdm.tqdm(df_y.columns.values.tolist(), desc="Plotting assets"):
-        if col == _SIMULATION_COLUMN:
-            continue
-        plot_df = df_mc.pivot(columns=_SIMULATION_COLUMN, values=col).tail(
-            _DAYS_OUT + 1
-        )
-        # Plotting
-        fig = plot_df.plot(
-            title=f"Monte Carlo Simulation: {col}",
-            labels={"value": "Price", "index": "Date", "simulation": "Path ID"},
-            template="plotly_dark",
-        )
-        # Add any additional styling
-        fig.add_scatter(
-            x=plot_df.index,
-            y=plot_df.median(axis=1),
-            name="Median",
-            line=dict(color="white", width=10),
-        )
-        fig.write_image(
-            f"monte_carlo_results_{col}.png", width=1200, height=800, scale=2
+        # n_jobs=-1 uses all available CPU cores
+        all_sims = Parallel(n_jobs=-1)(
+            delayed(run_single_simulation)(i, df_y.copy(), _DAYS_OUT, _WINDOWS, _LAGS)
+            for i in tqdm.tqdm(range(_SIMS), desc="Simulating")
         )
 
-    # Find the current options prices
-    for ticker in _TICKERS:
-        print(f"Finding pricing options for {ticker}")
-        find_mispriced_options(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
-        determine_spot_position(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
+        # Combine all simulations into one large DataFrame
+        df_mc = pd.concat(all_sims)  # type: ignore
+        pd.options.plotting.backend = "plotly"
+        for col in tqdm.tqdm(df_y.columns.values.tolist(), desc="Plotting assets"):
+            if col == _SIMULATION_COLUMN:
+                continue
+            plot_df = df_mc.pivot(columns=_SIMULATION_COLUMN, values=col).tail(
+                _DAYS_OUT + 1
+            )
+            # Plotting
+            fig = plot_df.plot(
+                title=f"Monte Carlo Simulation: {col}",
+                labels={"value": "Price", "index": "Date", "simulation": "Path ID"},
+                template="plotly_dark",
+            )
+            # Add any additional styling
+            fig.add_scatter(
+                x=plot_df.index,
+                y=plot_df.median(axis=1),
+                name="Median",
+                line=dict(color="white", width=10),
+            )
+            fig.write_image(
+                f"monte_carlo_results_{col}.png", width=1200, height=800, scale=2
+            )
+
+        # Find the current options prices
+        for ticker in _TICKERS:
+            print(f"Finding pricing options for {ticker}")
+            find_mispriced_options(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
+            determine_spot_position(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
 
 
 if __name__ == "__main__":
