@@ -52,7 +52,9 @@ def simulate(
     days_out: int,
     windows: list[int],
     lags: list[int],
-    sim_func: Callable[[int, pd.DataFrame, int, list[int], list[int]], None]
+    sim_func: Callable[
+        [int, pd.DataFrame, int, list[int], list[int]], list[pd.DataFrame]
+    ]
     | None = None,
 ) -> pd.DataFrame:
     """Simulate from trained models."""
