@@ -19,7 +19,7 @@ def _vine_filename(df_returns: pd.DataFrame) -> str:
 def load_vine_copula(df_returns: pd.DataFrame) -> pv.Vinecop:
     """Loads a vine copula model."""
     with open(_vine_filename(df_returns=df_returns), "r", encoding="utf8") as f:
-        return pv.Vinecop.from_json(json.load(f))
+        return pv.Vinecop.from_json(json.load(f), check=False)
 
 
 def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
