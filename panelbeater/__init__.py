@@ -3,7 +3,15 @@
 from .download import download
 from .fit import fit
 from .simulate import run_single_simulation, simulate
+from .trades import trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.8"
-__all__ = ["download", "fit", "create_wt", "simulate", "run_single_simulation"]
+__VERSION__ = "0.2.9"
+__all__ = [
+    "download",
+    "fit",
+    "create_wt",
+    "simulate",
+    "run_single_simulation",
+    "trades",
+]
