@@ -4,6 +4,7 @@
 from typing import Callable
 
 import pandas as pd
+import pyvinecopulib as pv
 import tqdm
 from joblib import Parallel, delayed
 
@@ -17,17 +18,21 @@ _SIMULATION_FILENAME = "sims.parquet"
 
 
 def run_single_simulation(
-    sim_idx: int, df_y, days_out: int, windows: list[int], lags: list[int]
+    sim_idx: int,
+    df_y,
+    days_out: int,
+    windows: list[int],
+    lags: list[int],
+    vine_cop: pv.Vinecop,
 ):
     """
     Encapsulates a single Monte Carlo path generation.
     """
     # Local copies for thread-safety (though joblib uses processes)
     df_y = df_y.copy()
-    vine_cop = load_vine_copula(df_returns=df_y)
     wavetrainer = create_wt()
 
-    for _ in range(days_out):
+    for _ in tqdm.tqdm(range(days_out), desc="Simulation Days"):
         # 1. Feature Engineering
         df_x = features(df=df_y.copy(), windows=windows, lags=lags)
 
@@ -53,20 +58,24 @@ def simulate(
     windows: list[int],
     lags: list[int],
     sim_func: Callable[
-        [int, pd.DataFrame, int, list[int], list[int]], list[pd.DataFrame]
+        [int, pd.DataFrame, int, list[int], list[int], pv.Vinecop], list[pd.DataFrame]
     ]
     | None = None,
 ) -> pd.DataFrame:
     """Simulate from trained models."""
     print(f"Starting {sims} simulations in parallel...")
+    vine_cop = load_vine_copula(df_returns=df_y)
+    print("Loaded vine copula")
     if sim_func is None:
         # n_jobs=-1 uses all available CPU cores
         all_sims = Parallel(n_jobs=-1)(
-            delayed(run_single_simulation)(i, df_y.copy(), days_out, windows, lags)
+            delayed(run_single_simulation)(
+                i, df_y.copy(), days_out, windows, lags, vine_cop
+            )
             for i in tqdm.tqdm(range(sims), desc="Simulating")
         )
     else:
-        all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags)
+        all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_cop)
     # Combine all simulations into one large DataFrame
     df_mc = pd.concat(all_sims)  # type: ignore
     df_mc.to_parquet(_SIMULATION_FILENAME)
