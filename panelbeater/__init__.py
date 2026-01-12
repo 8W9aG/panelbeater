@@ -2,11 +2,11 @@
 
 from .download import download
 from .fit import fit
-from .simulate import run_single_simulation, simulate
+from .simulate import SIMULATION_FILENAME, run_single_simulation, simulate
 from .trades import trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.10"
+__VERSION__ = "0.2.11"
 __all__ = [
     "download",
     "fit",
@@ -14,4 +14,5 @@ __all__ = [
     "simulate",
     "run_single_simulation",
     "trades",
+    "SIMULATION_FILENAME",
 ]

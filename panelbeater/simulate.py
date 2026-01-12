@@ -14,7 +14,7 @@ from .normalizer import denormalize
 from .wt import create_wt
 
 SIMULATION_COLUMN = "simulation"
-_SIMULATION_FILENAME = "sims.parquet"
+SIMULATION_FILENAME = "sims.parquet"
 
 
 def run_single_simulation(
@@ -78,10 +78,10 @@ def simulate(
         all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_cop)
     # Combine all simulations into one large DataFrame
     df_mc = pd.concat(all_sims)  # type: ignore
-    df_mc.to_parquet(_SIMULATION_FILENAME)
+    df_mc.to_parquet(SIMULATION_FILENAME)
     return df_mc
 
 
 def load_simulations() -> pd.DataFrame:
     """Load the rendered simulations."""
-    return pd.read_parquet(_SIMULATION_FILENAME)
+    return pd.read_parquet(SIMULATION_FILENAME)
