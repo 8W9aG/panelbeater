@@ -6,7 +6,7 @@ from .simulate import run_single_simulation, simulate
 from .trades import trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.9"
+__VERSION__ = "0.2.10"
 __all__ = [
     "download",
     "fit",

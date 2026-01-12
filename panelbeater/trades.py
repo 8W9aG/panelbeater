@@ -36,5 +36,5 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> None:
     # Find the current options prices
     for ticker in tickers:
         print(f"Finding pricing options for {ticker}")
-        find_mispriced_options(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
-        determine_spot_position(ticker, df_mc[f"PX_{ticker}"])  # pyright: ignore
+        find_mispriced_options(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore
+        determine_spot_position(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore
