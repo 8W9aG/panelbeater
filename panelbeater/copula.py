@@ -1,8 +1,8 @@
 """Handle joint distributions."""
 
 # pylint: disable=too-many-locals,pointless-string-statement
-import json
 import os
+import pickle
 import time
 from typing import Any, cast
 
@@ -13,14 +13,14 @@ import pyvinecopulib as pv
 
 def _vine_filename(df_returns: pd.DataFrame) -> str:
     struct_str = "-".join(sorted(df_returns.columns.values.tolist()))
-    return f"market_structure_{struct_str}.json"
+    return f"market_structure_{struct_str}.pkl"
 
 
 def load_vine_copula(df_returns: pd.DataFrame) -> pv.Vinecop:
     """Loads a vine copula model."""
     df_returns = df_returns.reindex(sorted(df_returns.columns), axis=1)
-    with open(_vine_filename(df_returns=df_returns), "r", encoding="utf8") as f:
-        return pv.Vinecop.from_json(json.load(f), check=False)
+    with open(_vine_filename(df_returns=df_returns), "rb") as f:
+        return pickle.load(f)
 
 
 def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
@@ -51,9 +51,10 @@ def fit_vine_copula(df_returns: pd.DataFrame, ttl_days: int = 30) -> pv.Vinecop:
 
     cop = pv.Vinecop.from_data(u, controls=controls)
 
-    # 3. Save for future runs
-    with open(vine_file, "w", encoding="utf8") as f:
-        json.dump(cop.to_json(), f)
+    # 3. Save via Pickle
+    with open(vine_file, "wb") as f:
+        # HIGHEST_PROTOCOL is faster and produces smaller files (currently Protocol 5)
+        pickle.dump(cop, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     return cop
 
