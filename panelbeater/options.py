@@ -134,7 +134,7 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
 
 def find_mispriced_options_comprehensive(
     ticker_symbol: str, sim_df: pd.DataFrame
-) -> pd.DataFrame:
+) -> pd.DataFrame | None:
     """Comprehensively find mispriced options in ITM and OTM."""
     ticker = yf.Ticker(ticker_symbol)
     spot = ticker.history(period="1d")["Close"].iloc[-1]
@@ -203,6 +203,9 @@ def find_mispriced_options_comprehensive(
                     "iv": row["impliedVolatility"],
                 }
             )
+
+    if not all_results:
+        return None
 
     comparison_df = pd.DataFrame(all_results)
 
