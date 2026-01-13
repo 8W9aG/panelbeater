@@ -84,8 +84,21 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
     Calculates TP/SL based on the percentile of predicted OPTION prices
     at a specific point in time (horizon_pct).
     """
-    # 1. Get the simulation slice for this expiry
-    sim_prices = sim_df.loc[row["expiry"]].values
+    # row.name is your index value (e.g., '2026-01-20')
+    target_date = row.name
+
+    # Check if target_date is in sim_df index
+    if target_date not in sim_df.index:
+        # If your index is datetime objects, convert target_date
+        # or handle string/datetime mismatch:
+        try:
+            sim_prices = sim_df.loc[target_date].values
+        except KeyError:
+            # Fallback for index type mismatch
+            target_dt = pd.to_datetime(target_date)
+            sim_prices = sim_df.loc[target_dt].values
+    else:
+        sim_prices = sim_df.loc[target_date].values
 
     # 2. Define the 'Check-in' time (Time to Expiry at our horizon)
     today = datetime.now()
