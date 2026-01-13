@@ -338,7 +338,7 @@ def determine_spot_position_and_save(
     ]
 
     df = pd.DataFrame(spot_data)
-    print(df)
+    print(df.to_dict())
 
     # 4. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
