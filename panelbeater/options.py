@@ -163,6 +163,17 @@ def find_mispriced_options_comprehensive(
         puts["expiry"] = date_str
 
         full_chain = pd.concat([calls, puts])
+
+        # --- LIQUIDITY FILTER START ---
+        # Filter for options that actually trade.
+        # Threshold: Open Interest > 50 AND Volume > 5 (Adjust as needed)
+        full_chain = full_chain[
+            (full_chain["openInterest"] > 50)
+            & (full_chain["volume"] >= 5)  # Change to > 0 for strictly active today
+            & (full_chain["ask"] > 0.05)  # Ignore "worthless" deep OTM scrap
+        ].copy()
+        # --- LIQUIDITY FILTER END ---
+
         model_prices_at_t = sim_df.loc[date_str].values
 
         for _, row in full_chain.iterrows():
@@ -327,6 +338,7 @@ def determine_spot_position_and_save(
     ]
 
     df = pd.DataFrame(spot_data)
+    print(df)
 
     # 4. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
