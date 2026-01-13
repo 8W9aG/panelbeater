@@ -14,7 +14,7 @@ def calculate_full_kelly(row, sim_df):
     """Calculate the kelly criterion for a probability mispricing."""
     target_date = row["expiry"]
     strike = row["strike"]
-    price = row["market_ask"]
+    price = row["ask"]
 
     if price <= 0:
         return 0, 0
