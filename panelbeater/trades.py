@@ -1,10 +1,11 @@
 """Handle generating trades."""
 
-# pylint: disable=use-dict-literal
+# pylint: disable=use-dict-literal,line-too-long
 import pandas as pd
 import tqdm
 
-from .options import determine_spot_position, find_mispriced_options
+from .options import (determine_spot_position_and_save,
+                      find_mispriced_options_comprehensive)
 from .simulate import SIMULATION_COLUMN, load_simulations
 
 
@@ -36,5 +37,5 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> None:
     # Find the current options prices
     for ticker in tickers:
         print(f"Finding pricing options for {ticker}")
-        find_mispriced_options(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore
-        determine_spot_position(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore
+        find_mispriced_options_comprehensive(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore
+        determine_spot_position_and_save(ticker, df_mc[f"PX_{ticker}"].copy())  # pyright: ignore

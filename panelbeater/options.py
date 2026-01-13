@@ -7,39 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import yfinance as yf
-from scipy import stats
-
-
-def get_price_probabilities(sim_df, target_date, bin_width=1.0):
-    """
-    Calculates the probability distribution of prices for a specific date.
-
-    Args:
-        sim_df: The simulation DataFrame (rows=dates, cols=paths)
-        target_date: The specific date (index) or integer location to analyze
-        bin_width: The size of the price buckets (e.g., $1.00)
-    """
-    # 1. Slice the simulation at the specific point in time
-    # This handles both a date-string index or a simple integer row index
-    if isinstance(target_date, int):
-        prices_at_t = sim_df.iloc[target_date]
-    else:
-        prices_at_t = sim_df.loc[target_date]
-
-    # 2. Define bins based on the range of prices on that specific day
-    min_p = np.floor(prices_at_t.min() / bin_width) * bin_width
-    max_p = np.ceil(prices_at_t.max() / bin_width) * bin_width
-    bins = np.arange(min_p, max_p + bin_width, bin_width)
-
-    # 3. Calculate probabilities
-    counts, bin_edges = np.histogram(prices_at_t, bins=bins)
-    probabilities = counts / len(prices_at_t)
-
-    # 4. Format into a DataFrame
-    price_points = bin_edges[:-1] + (bin_width / 2)
-    dist_df = pd.DataFrame({"price_point": price_points, "probability": probabilities})
-
-    return dist_df[dist_df["probability"] > 0].reset_index(drop=True)
+from scipy.stats import norm
 
 
 def calculate_full_kelly(row, sim_df):
@@ -83,266 +51,268 @@ def calculate_full_kelly(row, sim_df):
     return max(0, f_star), expected_payoff - price
 
 
-def black_scholes_price(S, K, T, r, sigma, option_type="put"):
-    """Calculate the black scholes price for an option."""
-    # S = Trigger Asset Price, K = Strike, T = Time remaining, r = Risk-free rate, sigma = IV
+def black_scholes_price(S, K, T, r, sigma, option_type="call"):
+    """
+    Vectorized Black-Scholes pricing for European options.
+
+    Parameters:
+    S (float or np.array): Current underlying price (or distribution of prices)
+    K (float): Strike price
+    T (float): Time to maturity in years (e.g., 0.5 for 6 months)
+    r (float): Risk-free interest rate (e.g., 0.04 for 4%)
+    sigma (float): Implied Volatility (e.g., 0.25 for 25%)
+    option_type (str): 'call' or 'put'
+    """
+    # Ensure T is non-zero to avoid division by zero errors at expiration
+    T = np.maximum(T, 1e-6)
+
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    if option_type == "call":
-        return S * stats.norm.cdf(d1) - K * np.exp(-r * T) * stats.norm.cdf(d2)
-    return K * np.exp(-r * T) * stats.norm.cdf(-d2) - S * stats.norm.cdf(-d1)
+
+    if option_type.lower() == "call":
+        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    elif option_type.lower() == "put":
+        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    else:
+        raise ValueError("option_type must be 'call' or 'put'")
+
+    return price
 
 
-def find_mispriced_options(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
-    """Find any mispriced options for an asset."""
+def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
+    """
+    Calculates TP/SL based on the percentile of predicted OPTION prices
+    at a specific point in time (horizon_pct).
+    """
+    # 1. Get the simulation slice for this expiry
+    sim_prices = sim_df.loc[row["expiry"]].values
 
-    # 1. Initialize the Ticker
+    # 2. Define the 'Check-in' time (Time to Expiry at our horizon)
+    today = datetime.now()
+    expiry_date = datetime.strptime(row["expiry"], "%Y-%m-%d")
+    total_days = (expiry_date - today).days
+
+    if total_days <= 0:
+        return row["ask"], row["ask"]
+
+    # We evaluate the option's value when 'horizon_pct' of time has passed
+    # e.g., if 30 days left, we look at its value in 15 days
+    days_to_horizon = total_days * horizon_pct
+    time_to_expiry_at_horizon = (total_days - days_to_horizon) / 365.0
+
+    # 3. Vectorized Black-Scholes: Map underlying distribution -> option distribution
+    # This simulates what the OPTION will be worth across all paths
+    predicted_option_values = black_scholes_price(
+        sim_prices,
+        row["strike"],
+        time_to_expiry_at_horizon,
+        0.04,  # Risk-free rate
+        row["iv"],
+        row["type"],
+    )
+
+    # 4. Set exits based on the model's specific distribution
+    # TP = 80th percentile (High confidence target)
+    # SL = 15th percentile (Cutting before total wipeout)
+    tp = np.percentile(predicted_option_values, 80)
+    sl = np.percentile(predicted_option_values, 15)
+
+    return tp, sl
+
+
+def find_mispriced_options_comprehensive(
+    ticker_symbol: str, sim_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Comprehensively find mispriced options in ITM and OTM."""
     ticker = yf.Ticker(ticker_symbol)
+    spot = ticker.history(period="1d")["Close"].iloc[-1]
 
-    # 1. Get dates from your simulation
     sim_dates = pd.to_datetime(sim_df.index).date.tolist()  # pyright: ignore
-
-    # 2. Get available expiries from the market
     available_expiries = [
         datetime.strptime(d, "%Y-%m-%d").date() for d in ticker.options
     ]
-
-    # 3. Find the common dates
-    # We want to find which days in our simulation actually have a tradeable option chain
     common_dates = sorted(list(set(sim_dates).intersection(set(available_expiries))))
 
-    print(f"Simulation covers {len(sim_dates)} days.")
-    print(f"Market has {len(available_expiries)} expiries available.")
-    print(f"Matches found for: {common_dates}")
-
-    # Storage for our comparison results
-    date_results = []
+    all_results = []
 
     for target_date in common_dates:
-        print(f"\n--- Processing Date: {target_date} ---")
-
-        # 1. Get YOUR model's probability for this specific day
-        # We use the function we built earlier
         date_str = target_date.strftime("%Y-%m-%d")
-
-        # 2. Download the MARKET's chain for this specific day
         chain = ticker.option_chain(date_str)
-        spot = ticker.history(period="1d")["Close"].iloc[-1]
-        calls = chain.calls[["strike", "bid", "ask", "impliedVolatility"]].copy()
-        calls = calls[calls["strike"] > spot * 1.02]
-        calls["option_type"] = "call"
-        puts = chain.puts[["strike", "bid", "ask", "impliedVolatility"]].copy()
-        puts = puts[puts["strike"] < spot * 0.98]
-        puts["option_type"] = "put"
 
-        # 3. Combine into one market view
+        # Pulling the full chain for both calls and puts
+        calls = chain.calls.copy()
+        puts = chain.puts.copy()
+
+        calls["type"] = "call"
+        puts["type"] = "put"
+
         full_chain = pd.concat([calls, puts])
-
-        # 4. Get your Model's Price Distribution for this specific day
-        # We grab the prices from sim_df for this row/date
         model_prices_at_t = sim_df.loc[date_str].values
 
-        # 5. Compare every strike in the market to your model's probability
         for _, row in full_chain.iterrows():
             k = row["strike"]
+            ask = row["ask"]
+            bid = row["bid"]
+            symbol = row[
+                "contractSymbol"
+            ]  # This is the unique ticker (e.g., TSLA260116C00200000)
 
-            if row["option_type"] == "call":
-                # Prob of finishing ABOVE the strike
+            if ask <= 0.05:
+                continue  # Filter for basic liquidity
+
+            # Determine Probability & ITM Status
+            if row["type"] == "call":
                 model_prob = np.mean(model_prices_at_t > k)
+                is_itm = spot > k
             else:
-                # Prob of finishing BELOW the strike
                 model_prob = np.mean(model_prices_at_t < k)
+                is_itm = spot < k
 
-            date_results.append(
+            # Premium-based Exit Logic (Adjust multipliers as needed)
+            tp_target, sl_target = calculate_distribution_exits(row, sim_df)
+
+            all_results.append(
                 {
-                    "date": date_str,
+                    "ticker": ticker_symbol,
+                    "option_symbol": symbol,
+                    "expiry": date_str,
                     "strike": k,
-                    "type": row["option_type"],
-                    "market_iv": row["impliedVolatility"],
-                    "market_ask": row["ask"],
+                    "type": row["type"],
+                    "is_itm": is_itm,
+                    "entry_range": f"${bid:.2f} - ${ask:.2f}",
+                    "ask": ask,
                     "model_prob": model_prob,
+                    "tp_target": tp_target,
+                    "sl_target": sl_target,
+                    "iv": row["impliedVolatility"],
                 }
             )
 
-    comparison_df = pd.DataFrame(date_results)
-    # Apply the calculation
-    results = comparison_df.apply(lambda row: calculate_full_kelly(row, sim_df), axis=1)
-    if results.empty:
-        return
+    comparison_df = pd.DataFrame(all_results)
 
+    # Calculate Kelly
+    results = comparison_df.apply(lambda row: calculate_full_kelly(row, sim_df), axis=1)
     comparison_df[["kelly_fraction", "expected_profit"]] = pd.DataFrame(
         results.tolist(), index=comparison_df.index
     )
 
-    # Filter for liquid options and positive edge
-    top_5 = (
-        comparison_df[comparison_df["market_ask"] > 0.10]  # pyright: ignore
-        .sort_values(by="kelly_fraction", ascending=False)
-        .head(4)
+    # Visualization and Saving
+    save_kelly_charts(comparison_df, ticker_symbol)
+
+    # 1. Add Metadata for History Tracking
+    # This allows you to compare different versions of your 'Panelbeater' world model later
+    comparison_df["run_timestamp"] = datetime.now()
+    comparison_df["ticker"] = ticker_symbol
+
+    # 2. Cleanup Data for Storage
+    # We ensure decimals are kept as floats for mathematical precision in future reads
+    export_df = comparison_df.copy()
+
+    # 3. Export to Parquet
+    # We use 'pyarrow' as the engine for better handling of complex types
+    filename = f"panelbeater_signals_{ticker_symbol}.parquet"
+    export_df.to_parquet(
+        filename,
+        engine="pyarrow",
+        compression="snappy",  # High performance compression
+        index=False,
     )
 
-    # Formatting for the final report
-    summary_report = top_5[
-        ["date", "strike", "type", "model_prob", "kelly_fraction", "expected_profit"]
-    ].copy()
-    summary_report["model_prob"] = summary_report["model_prob"].map("{:.1%}".format)  # pyright: ignore
-    summary_report["kelly_fraction"] = summary_report["kelly_fraction"].map(  # pyright: ignore
-        "{:.2%}".format
-    )
-    summary_report["expected_profit"] = summary_report["expected_profit"].map(  # pyright: ignore
-        "${:,.2f}".format
-    )
+    print(f"📊 Analysis complete. Saved {len(export_df)} strikes to {filename}")
+    return export_df
 
-    print(summary_report)
 
-    fig = px.scatter(
-        comparison_df[comparison_df["kelly_fraction"] > 0],
-        x="strike",
-        y="kelly_fraction",
-        color="type",
-        size="model_prob",
-        hover_data=["date"],
-        title="Full Kelly Allocation: Conviction by Strike and Option Type",
-        labels={"kelly_fraction": "Kelly Bet Size (%)", "strike": "Strike Price ($)"},
-        template="plotly_dark",
-    )
+def save_kelly_charts(df, ticker):
+    """Generates and saves separate Plotly charts for ITM and OTM options."""
+    for status in [True, False]:
+        label = "ITM" if status else "OTM"
+        subset = df[(df["is_itm"] == status) & (df["kelly_fraction"] > 0)].copy()
 
-    # Highlight the top 5 with annotations or larger markers
-    fig.update_traces(marker=dict(line=dict(width=1, color="White")))
-    fig.write_image(
-        f"kelly_conviction_report_{ticker_symbol}.png", width=1200, height=800
-    )
+        if subset.empty:
+            continue
 
-    exit_strategies = []
-
-    for _, trade in top_5.iterrows():
-        # Select appropriate simulation slices
-        sim_slice = sim_df.loc[trade["date"]]
-
-        # Calculate distribution stats for this specific expiry
-        mu = sim_slice.mean()
-        sigma = sim_slice.std()
-
-        # --- REASONABLE LOGIC START ---
-        # Instead of 95/5, use 0.5 to 1.0 standard deviation for targets
-        # This targets the 'meat' of the move your model predicts
-        if trade["type"] == "call":
-            # TP: The mean predicted price (where the bulk of the probability lies)
-            # SL: Half a standard deviation below the current spot or the mean
-            tp_price = mu + (0.2 * sigma)
-            sl_price = mu - (0.5 * sigma)
-        else:
-            # Put: Profit on the downside mean
-            tp_price = mu - (0.2 * sigma)
-            sl_price = mu + (0.5 * sigma)
-        # --- REASONABLE LOGIC END ---
-
-        # 1. Get today's date and calculate time to expiry
-        today = datetime.now()
-        expiry_date = datetime.strptime(trade["date"], "%Y-%m-%d")  # type: ignore
-        days_remaining = (expiry_date - today).days
-
-        # IMPORTANT: Exit triggers should be modeled for 'Today' or 'Soon',
-        # not the moment of expiry, otherwise extrinsic value is 0.
-        # We assume we hold for 25% of the remaining duration or at least 1 day.
-        holding_period_days = max(days_remaining * 0.25, 1)
-        time_to_trigger = max(days_remaining - holding_period_days, 0.5) / 365.0
-
-        tp_option_price = black_scholes_price(
-            tp_price,
-            trade["strike"],
-            time_to_trigger,
-            0.04,
-            trade["market_iv"],
-            str(trade["type"]),
-        )
-        sl_option_price = black_scholes_price(
-            sl_price,
-            trade["strike"],
-            time_to_trigger,
-            0.04,
-            trade["market_iv"],
-            str(trade["type"]),
+        fig = px.scatter(
+            subset,
+            x="strike",
+            y="kelly_fraction",
+            color="expiry",
+            size="model_prob",
+            symbol="type",
+            # Include option_symbol in hover data for easy identification
+            hover_data=["option_symbol", "entry_range", "tp_target", "sl_target"],
+            title=f"{ticker} - {label} Kelly Conviction by Expiry",
+            labels={
+                "kelly_fraction": "Kelly Allocation (%)",
+                "strike": "Strike Price ($)",
+            },
+            template="plotly_dark",
         )
 
-        exit_strategies.append(
-            {
-                "Strike": trade["strike"],
-                "Type": trade["type"],
-                "Kelly %": trade["kelly_fraction"],
-                "TP Asset Trigger": tp_price,
-                "SL Asset Trigger": sl_price,
-                "TP Option Price": tp_option_price,
-                "SL Option Price": sl_option_price,
-            }
-        )
+        fig.update_layout(legend_title_text="Expiration Date")
 
-    exit_df = pd.DataFrame(exit_strategies)
-    print(exit_df)
+        # Saving files
+        png_path = f"kelly_{label}_{ticker}.png"
+        fig.write_image(png_path, width=1400, height=800, scale=2)
+        print(f"Chart saved: {png_path}")
 
 
-def determine_spot_position(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
-    """
-    Determines optimal spot position (Long/Short), Kelly sizing,
-    and path-based exit levels for assets without options.
-    """
-    # 1. Get Current Market Data
+def determine_spot_position_and_save(
+    ticker_symbol: str, sim_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Determine the spot positions."""
     ticker = yf.Ticker(ticker_symbol)
-    spot_history = ticker.history(period="1d")
-
-    if spot_history.empty:
-        print(f"No market data for {ticker_symbol}")
-        return
-
-    spot_price = spot_history["Close"].iloc[-1]
-
-    # 2. Extract the Terminal Distribution
-    # Find the latest date in the index
+    spot_price = ticker.history(period="1d")["Close"].iloc[-1]
     last_date = sim_df.index.max()
+    date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
-    # Filter the DF for that date.
-    # This results in N rows (where N = number of simulations)
-    terminal_prices = sim_df.loc[[last_date]]
-
-    # 3. Determine Bias and Winning Path Ratio (p)
-    median_terminal = terminal_prices.median()  # This will now work!
+    # Extract distribution
+    terminal_prices = sim_df.loc[last_date].values
+    median_terminal = np.median(terminal_prices)
     is_long = median_terminal > spot_price
 
+    # 1. Distribution-Based Logic (Consistent with your Options logic)
     if is_long:
-        # Probability of finishing higher than spot
         p = np.mean(terminal_prices > spot_price)
-        tp_price = terminal_prices.quantile(0.95)
-        sl_price = terminal_prices.quantile(0.05)
+        tp_price = np.percentile(terminal_prices, 95)
+        sl_price = np.percentile(terminal_prices, 5)
     else:
-        # Probability of finishing lower than spot
         p = np.mean(terminal_prices < spot_price)
-        tp_price = terminal_prices.quantile(0.05)
-        sl_price = terminal_prices.quantile(0.95)
+        tp_price = np.percentile(terminal_prices, 5)
+        sl_price = np.percentile(terminal_prices, 95)
 
-    # 3. Calculate Odds (b) for Kelly
-    # b = (Expected Profit) / (Expected Loss if Stopped)
+    # 2. Kelly Calculation
     expected_profit = abs(tp_price - spot_price)
     expected_loss = abs(spot_price - sl_price)
     b = expected_profit / expected_loss
+    kelly_size = max(0, (p * (b + 1) - 1) / b) if b > 0 else 0
 
-    # 4. Full Kelly Formula: f* = (p(b+1) - 1) / b
-    if b > 0 and p > 0:
-        f_star = (p * (b + 1) - 1) / b
-        kelly_size = max(0, f_star)
-    else:
-        kelly_size = 0
+    # 3. Create Row with Unified Schema
+    spot_data = [
+        {
+            "run_timestamp": datetime.now(),
+            "ticker": ticker_symbol,
+            "option_symbol": f"{ticker_symbol}-SPOT",  # Identifying as spot
+            "expiry": date_str,
+            "strike": spot_price,  # Entry as strike for spot
+            "type": "spot_long" if is_long else "spot_short",
+            "is_itm": True,  # Spot is always "at the money" effectively
+            "entry_range": f"${spot_price:.2f}",
+            "ask": spot_price,
+            "model_prob": p,
+            "tp_target": tp_price,
+            "sl_target": sl_price,
+            "iv": sim_df.pct_change().std().iloc[0]  # pyright: ignore
+            * np.sqrt(252),  # Realized Vol Proxy
+            "kelly_fraction": kelly_size,
+            "expected_profit": (p * expected_profit) - ((1 - p) * expected_loss),
+        }
+    ]
 
-    # 5. Apply a 'Trader's Cap' (e.g., 10% of portfolio for spot)
-    final_size = min(kelly_size, 0.10)
+    df = pd.DataFrame(spot_data)
 
-    # Output Results
-    print(f"\n--- SPOT ANALYSIS FOR {ticker_symbol} ---")
-    print(f"Current Price: ${spot_price:.2f}")
-    print(f"Position: {'LONG' if is_long else 'SHORT'}")
-    print(f"Win Probability (p): {p:.1%}")
-    print(f"Risk/Reward Ratio (b): {b:.2f}")
-    print(f"Kelly Fraction: {kelly_size:.2%}")
-    print(f"Recommended Size (Capped): {final_size:.2%}")
-    print("-" * 30)
-    print(f"Take Profit Target: ${tp_price:.2f}")
-    print(f"Stop Loss (Invalidation): ${sl_price:.2f}")
+    # 4. Save to Parquet
+    filename = f"panelbeater_spot_{ticker_symbol}.parquet"
+    df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
+
+    print(f"✅ Spot analysis saved to {filename}")
+    return df
