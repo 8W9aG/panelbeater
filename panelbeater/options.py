@@ -119,7 +119,7 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
         row["strike"],
         time_to_expiry_at_horizon,
         0.04,  # Risk-free rate
-        row["iv"],
+        row["impliedVolatility"],
         row["type"],
     )
 
