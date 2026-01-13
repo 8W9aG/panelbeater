@@ -302,11 +302,7 @@ def determine_spot_position(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
 
     # Filter the DF for that date.
     # This results in N rows (where N = number of simulations)
-    terminal_distribution = sim_df.loc[[last_date]]
-
-    # Extract the specific ticker column
-    # terminal_prices is now a Series of predicted prices across all paths
-    terminal_prices = terminal_distribution[f"PX_{ticker_symbol}"]
+    terminal_prices = sim_df.loc[[last_date]]
 
     # 3. Determine Bias and Winning Path Ratio (p)
     median_terminal = terminal_prices.median()  # This will now work!
