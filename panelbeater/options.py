@@ -1,6 +1,6 @@
 """Process the options for the assets."""
 
-# pylint: disable=too-many-locals,consider-using-f-string,use-dict-literal,invalid-name,too-many-arguments,too-many-positional-arguments,too-many-statements,line-too-long
+# pylint: disable=too-many-locals,consider-using-f-string,use-dict-literal,invalid-name,too-many-arguments,too-many-positional-arguments,too-many-statements,line-too-long,bare-except
 from datetime import datetime
 
 import numpy as np
@@ -84,21 +84,20 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
     Calculates TP/SL based on the percentile of predicted OPTION prices
     at a specific point in time (horizon_pct).
     """
-    # row.name is your index value (e.g., '2026-01-20')
-    target_date = row.name
+    # Access the injected expiry column
+    date_val = row["expiry"]
 
-    # Check if target_date is in sim_df index
-    if target_date not in sim_df.index:
-        # If your index is datetime objects, convert target_date
-        # or handle string/datetime mismatch:
+    # Ensure matching index types (sim_df index vs date_val string)
+    if date_val not in sim_df.index:
+        # If sim_df index is Datetime objects, convert date_val
         try:
-            sim_prices = sim_df.loc[target_date].values
+            target_lookup = pd.to_datetime(date_val)
+            sim_prices = sim_df.loc[target_lookup].values
         except KeyError:
-            # Fallback for index type mismatch
-            target_dt = pd.to_datetime(target_date)
-            sim_prices = sim_df.loc[target_dt].values
+            # Fallback: convert index to string if needed
+            sim_prices = sim_df.loc[str(date_val)].values
     else:
-        sim_prices = sim_df.loc[target_date].values
+        sim_prices = sim_df.loc[date_val].values
 
     # 2. Define the 'Check-in' time (Time to Expiry at our horizon)
     today = datetime.now()
@@ -158,6 +157,10 @@ def find_mispriced_options_comprehensive(
 
         calls["type"] = "call"
         puts["type"] = "put"
+        # 1. INJECT THE EXPIRY HERE
+        # This ensures the row has the key your function is looking for
+        calls["expiry"] = date_str
+        puts["expiry"] = date_str
 
         full_chain = pd.concat([calls, puts])
         model_prices_at_t = sim_df.loc[date_str].values
