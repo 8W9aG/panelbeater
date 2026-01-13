@@ -12,7 +12,7 @@ from scipy.stats import norm
 
 def calculate_full_kelly(row, sim_df):
     """Calculate the kelly criterion for a probability mispricing."""
-    target_date = row["date"]
+    target_date = row["expiry"]
     strike = row["strike"]
     price = row["market_ask"]
 
