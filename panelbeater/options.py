@@ -288,22 +288,37 @@ def determine_spot_position(ticker_symbol: str, sim_df: pd.DataFrame) -> None:
     """
     # 1. Get Current Market Data
     ticker = yf.Ticker(ticker_symbol)
-    spot_price = ticker.history(period="1d")["Close"].iloc[-1]
+    spot_history = ticker.history(period="1d")
 
-    # Use the final row of simulation to determine the terminal distribution
-    terminal_prices = sim_df.iloc[-1]
-    print(terminal_prices)
+    if spot_history.empty:
+        print(f"No market data for {ticker_symbol}")
+        return
 
-    # 2. Determine Bias and Winning Path Ratio (p)
-    # Long if median is above spot; Short if median is below spot
-    median_terminal = terminal_prices.median()
+    spot_price = spot_history["Close"].iloc[-1]
+
+    # 2. Extract the Terminal Distribution
+    # Find the latest date in the index
+    last_date = sim_df.index.max()
+
+    # Filter the DF for that date.
+    # This results in N rows (where N = number of simulations)
+    terminal_distribution = sim_df.loc[[last_date]]
+
+    # Extract the specific ticker column
+    # terminal_prices is now a Series of predicted prices across all paths
+    terminal_prices = terminal_distribution[f"PX_{ticker_symbol}"]
+
+    # 3. Determine Bias and Winning Path Ratio (p)
+    median_terminal = terminal_prices.median()  # This will now work!
     is_long = median_terminal > spot_price
 
     if is_long:
-        p = terminal_prices.mean() > spot_price  # Probability of profit
-        tp_price = terminal_prices.quantile(0.95)  # 95th percentile target
-        sl_price = terminal_prices.quantile(0.05)  # 5th percentile stop
+        # Probability of finishing higher than spot
+        p = np.mean(terminal_prices > spot_price)
+        tp_price = terminal_prices.quantile(0.95)
+        sl_price = terminal_prices.quantile(0.05)
     else:
+        # Probability of finishing lower than spot
         p = np.mean(terminal_prices < spot_price)
         tp_price = terminal_prices.quantile(0.05)
         sl_price = terminal_prices.quantile(0.95)
