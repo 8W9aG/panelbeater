@@ -11,44 +11,48 @@ from scipy.stats import norm
 
 
 def calculate_full_kelly(row, sim_df):
-    """Calculate the kelly criterion for a probability mispricing."""
+    """
+    Calculates the pure Variance-Adjusted Kelly criterion.
+    No fractional scaling or arbitrary buffers applied.
+    """
     target_date = row["expiry"]
     strike = row["strike"]
-    price = row["ask"]
+    entry_price = row["ask"]
 
-    if price <= 0:
+    if entry_price <= 0:
         return 0, 0
 
-    # Extract the simulated prices for this specific date
+    # 1. Extract the simulated prices for this specific date
     prices_at_t = sim_df.loc[target_date].values
 
-    # Calculate the Payoff for every path
+    # 2. Calculate the Terminal Payoff for every path
     if row["type"] == "call":
         payoffs = np.maximum(prices_at_t - strike, 0)
     else:
         payoffs = np.maximum(strike - prices_at_t, 0)
 
-    expected_payoff = np.mean(payoffs)
+    # 3. Convert Payoffs to Percentage Returns
+    # Note: A payoff of 0 results in a -1.0 (-100%) return.
+    returns = (payoffs - entry_price) / entry_price
 
-    # 1. Probability of winning (p)
-    p = row["model_prob"]
-    if p <= 0:
+    # 4. Calculate Moments of the Distribution
+    expected_return = np.mean(returns)
+    variance_return = np.var(returns)
+
+    # 5. Pure Kelly Formula: f* = E[r] / Var(r)
+    # This accounts for the spread (variance) as a direct divisor.
+    if variance_return == 0:
         return 0, 0
 
-    # 2. Net Odds (b)
-    # This is (Expected Profit if we win) / (Amount Lost if we lose)
-    # Average payoff of the winning paths
-    avg_win_payoff = expected_payoff / p
-    net_profit_if_win = avg_win_payoff - price
-    b = net_profit_if_win / price
+    f_star = expected_return / variance_return
 
-    if b <= 0:
-        return 0, 0
+    # 6. Directional Constraint
+    # We only take positions with positive expected value.
+    suggested_size = max(0, f_star)
 
-    # 3. Full Kelly Formula: f* = (p(b+1) - 1) / b
-    f_star = (p * (b + 1) - 1) / b
+    expected_profit_dollars = expected_return * entry_price
 
-    return max(0, f_star), expected_payoff - price
+    return suggested_size, expected_profit_dollars
 
 
 def black_scholes_price(S, K, T, r, sigma, option_type="call"):
@@ -289,18 +293,41 @@ def save_kelly_charts(df, ticker):
 def determine_spot_position_and_save(
     ticker_symbol: str, sim_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Determine the spot positions."""
+    """Determine the spot positions using variance-aware Mean-Variance Kelly."""
     ticker = yf.Ticker(ticker_symbol)
     spot_price = ticker.history(period="1d")["Close"].iloc[-1]
     last_date = sim_df.index.max()
     date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
-    # Extract distribution
+    # Extract the full distribution of terminal prices
     terminal_prices = sim_df.loc[last_date].values
-    median_terminal = np.median(terminal_prices)
-    is_long = median_terminal > spot_price
 
-    # 1. Distribution-Based Logic (Consistent with your Options logic)
+    # 1. Calculate returns for every path
+    # (Terminal Price - Entry Price) / Entry Price
+    # This automatically handles both long and short logic via the sign of the mean
+    path_returns = (terminal_prices - spot_price) / spot_price
+
+    mean_return = np.mean(path_returns)
+    variance_return = np.var(path_returns)
+
+    # Determine direction based on expectancy
+    is_long = mean_return > 0
+
+    # If short, we invert the returns to calculate Kelly for a short position
+    if not is_long:
+        actual_returns = -path_returns
+        mean_return = np.mean(actual_returns)
+        # Variance remains the same for inverted returns
+    else:
+        actual_returns = path_returns
+
+    # 2. Pure Mean-Variance Kelly Calculation: f* = E[r] / Var(r)
+    if variance_return > 0 and mean_return > 0:
+        kelly_size = mean_return / variance_return
+    else:
+        kelly_size = 0
+
+    # 3. Descriptive Stats for the Parquet (TP/SL still useful for visualization/execution)
     if is_long:
         p = np.mean(terminal_prices > spot_price)
         tp_price = np.percentile(terminal_prices, 95)
@@ -310,39 +337,33 @@ def determine_spot_position_and_save(
         tp_price = np.percentile(terminal_prices, 5)
         sl_price = np.percentile(terminal_prices, 95)
 
-    # 2. Kelly Calculation
-    expected_profit = abs(tp_price - spot_price)
-    expected_loss = abs(spot_price - sl_price)
-    b = expected_profit / expected_loss
-    kelly_size = max(0, (p * (b + 1) - 1) / b) if b > 0 else 0
-
-    # 3. Create Row with Unified Schema
+    # 4. Create Row with Unified Schema
     spot_data = [
         {
             "run_timestamp": datetime.now(),
             "ticker": ticker_symbol,
-            "option_symbol": f"{ticker_symbol}-SPOT",  # Identifying as spot
+            "option_symbol": f"{ticker_symbol}-SPOT",
             "expiry": date_str,
-            "strike": spot_price,  # Entry as strike for spot
+            "strike": spot_price,
             "type": "spot_long" if is_long else "spot_short",
-            "is_itm": True,  # Spot is always "at the money" effectively
+            "is_itm": True,
             "entry_range": f"${spot_price:.2f}",
             "ask": spot_price,
             "model_prob": p,
             "tp_target": tp_price,
             "sl_target": sl_price,
             "iv": None,
-            "kelly_fraction": kelly_size,
-            "expected_profit": (p * expected_profit) - ((1 - p) * expected_loss),
+            "kelly_fraction": max(0, kelly_size),
+            "expected_profit": mean_return * spot_price,  # Expected dollar move
         }
     ]
 
     df = pd.DataFrame(spot_data)
     print(df.to_dict())
 
-    # 4. Save to Parquet
+    # 5. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
     df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
 
-    print(f"✅ Spot analysis saved to {filename}")
+    print(f"✅ Variance-aware spot analysis saved to {filename}")
     return df
