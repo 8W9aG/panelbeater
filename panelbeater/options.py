@@ -317,8 +317,7 @@ def determine_spot_position_and_save(
             "model_prob": p,
             "tp_target": tp_price,
             "sl_target": sl_price,
-            "iv": sim_df.pct_change().std().iloc[0]  # pyright: ignore
-            * np.sqrt(252),  # Realized Vol Proxy
+            "iv": None,
             "kelly_fraction": kelly_size,
             "expected_profit": (p * expected_profit) - ((1 - p) * expected_loss),
         }
