@@ -14,6 +14,7 @@ def calculate_full_kelly(row, sim_df):
     """
     Calculates the pure Variance-Adjusted Kelly criterion.
     No fractional scaling or arbitrary buffers applied.
+    Returns: (f_star, expected_gain_pct)
     """
     target_date = row["expiry"]
     strike = row["strike"]
@@ -31,8 +32,8 @@ def calculate_full_kelly(row, sim_df):
     else:
         payoffs = np.maximum(strike - prices_at_t, 0)
 
-    # 3. Convert Payoffs to Percentage Returns
-    # Note: A payoff of 0 results in a -1.0 (-100%) return.
+    # 3. Convert Payoffs to Percentage Returns (Decimal form)
+    # A payoff of 0 results in a -1.0 (-100%) return.
     returns = (payoffs - entry_price) / entry_price
 
     # 4. Calculate Moments of the Distribution
@@ -40,7 +41,6 @@ def calculate_full_kelly(row, sim_df):
     variance_return = np.var(returns)
 
     # 5. Pure Kelly Formula: f* = E[r] / Var(r)
-    # This accounts for the spread (variance) as a direct divisor.
     if variance_return == 0:
         return 0, 0
 
@@ -50,9 +50,10 @@ def calculate_full_kelly(row, sim_df):
     # We only take positions with positive expected value.
     suggested_size = max(0, f_star)
 
-    expected_profit_dollars = expected_return * entry_price
+    # Convert the expected return decimal to a percentage
+    expected_gain_pct = expected_return * 100
 
-    return suggested_size, expected_profit_dollars
+    return suggested_size, expected_gain_pct
 
 
 def black_scholes_price(S, K, T, r, sigma, option_type="call"):
@@ -303,8 +304,6 @@ def determine_spot_position_and_save(
     terminal_prices = sim_df.loc[last_date].values
 
     # 1. Calculate returns for every path
-    # (Terminal Price - Entry Price) / Entry Price
-    # This automatically handles both long and short logic via the sign of the mean
     path_returns = (terminal_prices - spot_price) / spot_price
 
     mean_return = np.mean(path_returns)
@@ -317,7 +316,6 @@ def determine_spot_position_and_save(
     if not is_long:
         actual_returns = -path_returns
         mean_return = np.mean(actual_returns)
-        # Variance remains the same for inverted returns
     else:
         actual_returns = path_returns
 
@@ -327,7 +325,7 @@ def determine_spot_position_and_save(
     else:
         kelly_size = 0
 
-    # 3. Descriptive Stats for the Parquet (TP/SL still useful for visualization/execution)
+    # 3. Descriptive Stats
     if is_long:
         p = np.mean(terminal_prices > spot_price)
         tp_price = np.percentile(terminal_prices, 95)
@@ -354,12 +352,12 @@ def determine_spot_position_and_save(
             "sl_target": sl_price,
             "iv": None,
             "kelly_fraction": max(0, kelly_size),
-            "expected_profit": mean_return * spot_price,  # Expected dollar move
+            # CHANGED: Multiply mean_return by 100 for percentage gain
+            "expected_profit": mean_return * 100,
         }
     ]
 
     df = pd.DataFrame(spot_data)
-    print(df.to_dict())
 
     # 5. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"

@@ -62,4 +62,4 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
             df_mc[f"PX_{ticker}"].copy(),  # pyright: ignore
         )  # pyright: ignore
         all_trades.append(spot_trades)
-    return pd.concat(all_trades, axis=1)
+    return pd.concat(all_trades, axis=0, ignore_index=True)
