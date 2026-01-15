@@ -323,8 +323,15 @@ def determine_spot_position_and_save(
     last_date = sim_df.index.max()
     date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
-    # Access the full simulation matrix (rows=dates, columns=paths)
-    path_matrix = sim_df.values
+    # Force path_matrix to be 2D (Rows: Time, Cols: Paths)
+    # This prevents the IndexError if sim_df has unexpected dimensions
+    path_matrix = np.atleast_2d(sim_df.values)
+
+    # If sim_df was (N, 1), path_matrix is (N, 1).
+    # If sim_df was just (N,), path_matrix becomes (1, N). We need (N, 1) or (N, M).
+    if path_matrix.shape[0] == 1 and len(sim_df.index) > 1:
+        path_matrix = path_matrix.T
+
     terminal_prices = path_matrix[-1]
 
     # 1. Determine Direction and Dynamic Boundaries
@@ -344,8 +351,9 @@ def determine_spot_position_and_save(
     # 2. Path-Aware Outcome Calculation
     path_outcomes = []
 
-    # path_matrix.shape[1] is the number of simulation paths
-    for col in range(path_matrix.shape[1]):
+    # Iterate through each column (each simulation path)
+    num_paths = path_matrix.shape[1]
+    for col in range(num_paths):
         single_path = path_matrix[:, col]
 
         if is_long:
@@ -360,25 +368,20 @@ def determine_spot_position_and_save(
         first_sl = hit_sl_idx[0] if len(hit_sl_idx) > 0 else float("inf")
 
         if first_tp < first_sl:
-            # Hit TP first: record return at TP level
             path_outcomes.append((tp_level - spot_price) / spot_price)
         elif first_sl < first_tp:
-            # Hit SL first: record return at SL level
             path_outcomes.append((sl_level - spot_price) / spot_price)
         else:
-            # Hit neither: record terminal return
             path_outcomes.append((single_path[-1] - spot_price) / spot_price)
 
-    # 3. Mean-Variance Kelly (Pure Log-Optimal)
+    # 3. Mean-Variance Kelly
     path_returns = np.array(path_outcomes)
-    # If short, we invert the returns so that "profit" is positive for the formula
     actual_returns = path_returns if is_long else -path_returns
 
     mean_r = np.mean(actual_returns)
     var_r = np.var(actual_returns)
 
     # Pure Kelly: f* = E[r] / Var(r)
-    # No fractional Kelly or caps applied here as requested.
     if var_r > 0 and mean_r > 0:
         kelly_size = mean_r / var_r
     else:
@@ -397,22 +400,20 @@ def determine_spot_position_and_save(
             "entry_range": f"${spot_price:.2f}",
             "ask": spot_price,
             "model_prob": np.mean(
-                path_returns >= tp_level if is_long else path_returns <= tp_level
-            ),
+                actual_returns > 0
+            ),  # Simplified prob based on path outcomes
             "tp_target": tp_level,
             "sl_target": sl_level,
             "iv": None,
             "kelly_fraction": max(0, kelly_size),
-            "expected_profit": mean_r * 100,  # Percentage-based expected profit
+            "expected_profit": mean_r * 100,
             "volatility_regime": "High" if volatility_ratio > 0.15 else "Normal",
         }
     ]
 
     df = pd.DataFrame(spot_data)
-
-    # 5. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
     df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
 
-    print(f"✅ Fixed Path-aware spot analysis saved. Kelly Size: {kelly_size:.2%}")
+    print(f"✅ Path-aware spot saved. Paths: {num_paths}, Kelly: {kelly_size:.2%}")
     return df
