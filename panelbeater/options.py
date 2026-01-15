@@ -323,20 +323,17 @@ def determine_spot_position_and_save(
     last_date = sim_df.index.max()
     date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
+    # Access the full simulation matrix (rows=dates, columns=paths)
     path_matrix = sim_df.values
     terminal_prices = path_matrix[-1]
 
-    # 1. Calculate Baseline Variance to define "Dynamic" levels
-    # We use the standard deviation of terminal prices to scale our targets
+    # 1. Determine Direction and Dynamic Boundaries
     terminal_std = np.std(terminal_prices)
     is_long = np.median(terminal_prices) > spot_price
-
-    # DYNAMIC LOGIC:
-    # If terminal variance is high, we tighten our percentiles (e.g., 80/20 instead of 95/5)
-    # to ensure we aren't chasing 'outlier' paths that have low probability.
     volatility_ratio = terminal_std / spot_price
 
-    if volatility_ratio > 0.15:  # Arbitrary "high vol" threshold
+    # Tighten percentiles if volatility is high
+    if volatility_ratio > 0.15:
         tp_pct, sl_pct = (80, 20) if is_long else (20, 80)
     else:
         tp_pct, sl_pct = (95, 5) if is_long else (5, 95)
@@ -346,10 +343,11 @@ def determine_spot_position_and_save(
 
     # 2. Path-Aware Outcome Calculation
     path_outcomes = []
+
+    # path_matrix.shape[1] is the number of simulation paths
     for col in range(path_matrix.shape[1]):
         single_path = path_matrix[:, col]
 
-        # Find indices where price crosses boundaries
         if is_long:
             hit_tp_idx = np.where(single_path >= tp_level)[0]
             hit_sl_idx = np.where(single_path <= sl_level)[0]
@@ -357,26 +355,34 @@ def determine_spot_position_and_save(
             hit_tp_idx = np.where(single_path <= tp_level)[0]
             hit_sl_idx = np.where(single_path >= sl_level)[0]
 
-        # Correctly reference the index variables defined above
+        # Determine which boundary was hit first
         first_tp = hit_tp_idx[0] if len(hit_tp_idx) > 0 else float("inf")
         first_sl = hit_sl_idx[0] if len(hit_sl_idx) > 0 else float("inf")
 
         if first_tp < first_sl:
-            # Hit TP first: Outcome is the return at TP
+            # Hit TP first: record return at TP level
             path_outcomes.append((tp_level - spot_price) / spot_price)
         elif first_sl < first_tp:
-            # Hit SL first: Outcome is the return at SL
+            # Hit SL first: record return at SL level
             path_outcomes.append((sl_level - spot_price) / spot_price)
+        else:
+            # Hit neither: record terminal return
+            path_outcomes.append((single_path[-1] - spot_price) / spot_price)
 
-    # 3. Mean-Variance Kelly
+    # 3. Mean-Variance Kelly (Pure Log-Optimal)
     path_returns = np.array(path_outcomes)
+    # If short, we invert the returns so that "profit" is positive for the formula
     actual_returns = path_returns if is_long else -path_returns
 
     mean_r = np.mean(actual_returns)
     var_r = np.var(actual_returns)
 
-    # Kelly: f* = E[r] / Var(r)
-    kelly_size = (mean_r / var_r) if var_r > 0 and mean_r > 0 else 0
+    # Pure Kelly: f* = E[r] / Var(r)
+    # No fractional Kelly or caps applied here as requested.
+    if var_r > 0 and mean_r > 0:
+        kelly_size = mean_r / var_r
+    else:
+        kelly_size = 0
 
     # 4. Final Metadata and Save
     spot_data = [
@@ -387,17 +393,26 @@ def determine_spot_position_and_save(
             "expiry": date_str,
             "strike": spot_price,
             "type": "spot_long" if is_long else "spot_short",
+            "is_itm": True,
+            "entry_range": f"${spot_price:.2f}",
+            "ask": spot_price,
+            "model_prob": np.mean(
+                path_returns >= tp_level if is_long else path_returns <= tp_level
+            ),
             "tp_target": tp_level,
             "sl_target": sl_level,
+            "iv": None,
             "kelly_fraction": max(0, kelly_size),
-            "expected_profit": mean_r * 100,
+            "expected_profit": mean_r * 100,  # Percentage-based expected profit
             "volatility_regime": "High" if volatility_ratio > 0.15 else "Normal",
         }
     ]
 
     df = pd.DataFrame(spot_data)
+
+    # 5. Save to Parquet
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
     df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
 
-    print(f"✅ Dynamic Path-aware analysis saved. Size: {kelly_size:.2%}")
+    print(f"✅ Fixed Path-aware spot analysis saved. Kelly Size: {kelly_size:.2%}")
     return df
