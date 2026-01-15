@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from .download import download
 from .fit import fit
 from .simulate import simulate
+from .sync import sync_positions
 from .trades import trades
 
 _TICKERS = [
@@ -77,6 +78,13 @@ def main() -> None:
         default=True,
         action=argparse.BooleanOptionalAction,
     )
+    parser.add_argument(
+        "--sync",
+        help="Whether to synchronise the trades.",
+        required=False,
+        default=False,
+        action=argparse.BooleanOptionalAction,
+    )
     args = parser.parse_args()
 
     # Setup main objects
@@ -93,7 +101,9 @@ def main() -> None:
         )
 
     if args.trades:
-        trades(df_y=df_y, days_out=_DAYS_OUT, tickers=_TICKERS)
+        df_trades = trades(df_y=df_y, days_out=_DAYS_OUT, tickers=_TICKERS)
+        if args.sync:
+            sync_positions(df_trades)
 
 
 if __name__ == "__main__":

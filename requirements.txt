@@ -15,3 +15,4 @@ plotly>=6.3.1
 scipy>=1.16.3
 joblib>=1.5.2
 pyarrow>=22.0.0
+alpaca-py>=0.43.2
