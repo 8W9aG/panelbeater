@@ -1,6 +1,6 @@
 """Synchronise the account to the latest information."""
 
-# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments,superfluous-parens
+# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments,superfluous-parens,line-too-long
 import os
 import time
 
@@ -27,44 +27,53 @@ def sync_positions(df: pd.DataFrame):
     )
     # 1. Determine Capital Allocation
     account = trading_client.get_account()
-    # Using buying_power ensures we stay within Alpaca's limits
     available_funds = float(account.buying_power)  # type: ignore
 
     total_conviction = df["kelly_fraction"].sum()
-    # Proportionally distribute available funds based on Kelly weights
     df["target_usd"] = (df["kelly_fraction"] / total_conviction) * available_funds
 
-    # 2. Get Current State
     positions = {p.symbol: p for p in trading_client.get_all_positions()}  # type: ignore
 
     for _, row in df.iterrows():
-        # Identify asset type (e.g., ETH-USD is crypto, AAPL is equity)
         ticker_raw = row["ticker"]
         is_crypto = "-" in ticker_raw or "/" in ticker_raw
         symbol = ticker_raw.replace("-", "")  # pyright: ignore
 
-        # Get Current Price and Quantity
-        if symbol in positions:
-            price = float(positions[symbol].current_price)  # type: ignore
-            current_qty = float(positions[symbol].qty)  # type: ignore
-        else:
-            # Fallback to model's price if not currently held
-            price = float(row["ask"])
-            current_qty = 0.0
+        # Get Current State
+        price = (
+            float(positions[symbol].current_price)  # type: ignore
+            if symbol in positions
+            else float(row["ask"])
+        )
+        current_qty = float(positions[symbol].qty) if symbol in positions else 0.0  # type: ignore
 
-        # Calculate Delta
+        # Calculate Target Quantity
         target_qty = row["target_usd"] / price
-        if row["type"] == "spot_short":
-            target_qty = -target_qty
 
+        # --- SHORTING LOGIC OVERRIDE ---
+        if row["type"] == "spot_short":
+            if is_crypto:
+                print(
+                    f"[{symbol}] Alpaca doesn't support Crypto shorting. Setting target to 0 (Exit)."
+                )
+                target_qty = 0.0
+            else:
+                target_qty = -target_qty  # Equities can be negative if Margin > $2000
+
+        # --- SELL SAFETY CHECK (For Crypto) ---
         diff_qty = target_qty - current_qty
+
+        if is_crypto and diff_qty < 0:
+            # If we are selling, don't try to sell more than we own
+            # This prevents the 'requested: X, available: Y' error
+            max_sellable = current_qty
+            if abs(diff_qty) > max_sellable:
+                print(f"[{symbol}] Capping sell to available balance: {max_sellable}")
+                diff_qty = -max_sellable
+
         diff_usd = abs(diff_qty * price)
 
-        # 3. Conviction Threshold Check
         if diff_usd < MIN_TRADE_USD:
-            print(
-                f"[{symbol}] Change (${diff_usd:.2f}) below threshold. Updating TP/SL only."
-            )
             update_exits(symbol, row["tp_target"], row["sl_target"], trading_client)
             continue
 
