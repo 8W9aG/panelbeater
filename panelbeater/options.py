@@ -12,18 +12,27 @@ from scipy.stats import norm
 
 def prepare_path_matrix(sim_df, ticker_symbol):
     """
-    Pivots a Long-format Panelbeater simulation into a Wide-format path matrix.
-    ticker_symbol: e.g., 'QQQ' (will look for 'PX_QQQ' in columns)
+    Pivots Long-format simulation into Wide-format paths.
     """
+    # If a Series was passed, we can't pivot because we lost the 'simulation' IDs
+    if isinstance(sim_df, pd.Series):
+        raise ValueError(
+            "prepare_path_matrix requires the full DataFrame to access the 'simulation' column."
+        )
+
     column_name = f"PX_{ticker_symbol}"
 
     if column_name not in sim_df.columns:
-        raise ValueError(f"Column {column_name} not found in simulation data.")
+        # Fallback for ETH/BTC etc where the prefix might be different
+        possible_cols = [c for c in sim_df.columns if ticker_symbol in c]
+        if not possible_cols:
+            raise ValueError(f"Could not find price column for {ticker_symbol}")
+        column_name = possible_cols[0]
 
-    # Pivot: Index = Date, Columns = Simulation ID, Values = Asset Price
-    path_matrix_df = sim_df.pivot(columns="simulation", values=column_name)
-
-    return path_matrix_df
+    # The magic pivot: Rows become Dates, Columns become Simulation IDs
+    # [Image of pivoting a long-format dataframe into a wide-format matrix]
+    wide_df = sim_df.pivot(columns="simulation", values=column_name)
+    return wide_df
 
 
 def calculate_full_kelly_path_aware(row, sim_df):
@@ -341,70 +350,46 @@ def save_kelly_charts(df, ticker):
 def determine_spot_position_and_save(
     ticker_symbol: str, sim_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Spot positions with dynamic boundary tightening and path-aware Kelly."""
-    sim_df = prepare_path_matrix(sim_df, ticker_symbol)
+    """Determine spot position."""
     ticker = yf.Ticker(ticker_symbol)
     spot_price = ticker.history(period="1d")["Close"].iloc[-1]
-    last_date = sim_df.index.max()
-    date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
-    # 1. Force the matrix into the correct shape
-    # We want Rows = Time, Columns = Paths
-    raw_values = sim_df.values
+    # 1. Transform Long -> Wide
+    # This turns your stacked simulations into a 2D Path Matrix
+    wide_paths = prepare_path_matrix(sim_df.to_frame(), ticker_symbol)
 
-    if raw_values.ndim == 1:
-        # If it's a single path, it was likely a Series.
-        # We need to reshape it back to (Length, 1)
-        path_matrix = raw_values.reshape(-1, 1)
-    else:
-        path_matrix = raw_values
-
-    num_paths = path_matrix.shape[1]
-
-    # DEBUG PRINT: Check what is actually coming in
-    print(
-        f"DEBUG: sim_df shape: {sim_df.shape}, Path Matrix shape: {path_matrix.shape}"
-    )
-
-    # If sim_df was (N, 1), path_matrix is (N, 1).
-    # If sim_df was just (N,), path_matrix becomes (1, N). We need (N, 1) or (N, M).
-    if path_matrix.shape[0] == 1 and len(sim_df.index) > 1:
-        path_matrix = path_matrix.T
-
+    path_matrix = wide_paths.values  # Shape: (TimeSteps, NumSimulations)
     terminal_prices = path_matrix[-1]
 
-    # 1. Determine Direction and Dynamic Boundaries
+    # 2. Dynamic Boundaries
     terminal_std = np.std(terminal_prices)
     is_long = np.median(terminal_prices) > spot_price
     volatility_ratio = terminal_std / spot_price
 
-    # Tighten percentiles if volatility is high
-    if volatility_ratio > 0.15:
-        tp_pct, sl_pct = (80, 20) if is_long else (20, 80)
-    else:
-        tp_pct, sl_pct = (95, 5) if is_long else (5, 95)
+    # Tighten targets if volatility is high
+    tp_pct, sl_pct = (
+        ((80, 20) if is_long else (20, 80))
+        if volatility_ratio > 0.15
+        else ((95, 5) if is_long else (5, 95))
+    )
 
     tp_level = np.percentile(terminal_prices, tp_pct)
     sl_level = np.percentile(terminal_prices, sl_pct)
 
-    # 2. Path-Aware Outcome Calculation
+    # 3. Path-Aware Outcome Logic
     path_outcomes = []
-
-    # Iterate through each column (each simulation path)
-    num_paths = path_matrix.shape[1]
-    for col in range(num_paths):
+    for col in range(path_matrix.shape[1]):
         single_path = path_matrix[:, col]
 
-        if is_long:
-            hit_tp_idx = np.where(single_path >= tp_level)[0]
-            hit_sl_idx = np.where(single_path <= sl_level)[0]
-        else:
-            hit_tp_idx = np.where(single_path <= tp_level)[0]
-            hit_sl_idx = np.where(single_path >= sl_level)[0]
+        hit_tp = np.where(
+            single_path >= tp_level if is_long else single_path <= tp_level
+        )[0]
+        hit_sl = np.where(
+            single_path <= sl_level if is_long else single_path >= sl_level
+        )[0]
 
-        # Determine which boundary was hit first
-        first_tp = hit_tp_idx[0] if len(hit_tp_idx) > 0 else float("inf")
-        first_sl = hit_sl_idx[0] if len(hit_sl_idx) > 0 else float("inf")
+        first_tp = hit_tp[0] if len(hit_tp) > 0 else float("inf")
+        first_sl = hit_sl[0] if len(hit_sl) > 0 else float("inf")
 
         if first_tp < first_sl:
             path_outcomes.append((tp_level - spot_price) / spot_price)
@@ -413,7 +398,8 @@ def determine_spot_position_and_save(
         else:
             path_outcomes.append((single_path[-1] - spot_price) / spot_price)
 
-    # 3. Mean-Variance Kelly
+    # 4. Variance-Aware Kelly: f* = E[r] / Var(r)
+    # [Image of Mean-Variance Optimization and Kelly Criterion relationship]
     path_returns = np.array(path_outcomes)
     actual_returns = path_returns if is_long else -path_returns
 
@@ -432,7 +418,7 @@ def determine_spot_position_and_save(
             "run_timestamp": datetime.now(),
             "ticker": ticker_symbol,
             "option_symbol": f"{ticker_symbol}-SPOT",
-            "expiry": date_str,
+            "expiry": None,
             "strike": spot_price,
             "type": "spot_long" if is_long else "spot_short",
             "is_itm": True,
@@ -454,5 +440,7 @@ def determine_spot_position_and_save(
     filename = f"panelbeater_spot_{ticker_symbol}.parquet"
     df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
 
-    print(f"✅ Path-aware spot saved. Paths: {num_paths}, Kelly: {kelly_size:.2%}")
+    print(
+        f"✅ Path-aware spot saved. Paths: {len(path_returns)}, Kelly: {kelly_size:.2%}"
+    )
     return df
