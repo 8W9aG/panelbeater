@@ -10,6 +10,22 @@ import yfinance as yf
 from scipy.stats import norm
 
 
+def prepare_path_matrix(sim_df, ticker_symbol):
+    """
+    Pivots a Long-format Panelbeater simulation into a Wide-format path matrix.
+    ticker_symbol: e.g., 'QQQ' (will look for 'PX_QQQ' in columns)
+    """
+    column_name = f"PX_{ticker_symbol}"
+
+    if column_name not in sim_df.columns:
+        raise ValueError(f"Column {column_name} not found in simulation data.")
+
+    # Pivot: Index = Date, Columns = Simulation ID, Values = Asset Price
+    path_matrix_df = sim_df.pivot(columns="simulation", values=column_name)
+
+    return path_matrix_df
+
+
 def calculate_full_kelly_path_aware(row, sim_df):
     """
     Comprehensive Kelly sizing for options:
@@ -253,8 +269,10 @@ def find_mispriced_options_comprehensive(
     comparison_df = pd.DataFrame(all_results)
 
     # Calculate Kelly
+    wide_sim_df = prepare_path_matrix(sim_df, ticker_symbol)
+    print(f"DEBUG: Wide Matrix Shape: {wide_sim_df.shape}")
     results = comparison_df.apply(
-        lambda row: calculate_full_kelly_path_aware(row, sim_df), axis=1
+        lambda row: calculate_full_kelly_path_aware(row, wide_sim_df), axis=1
     )
     comparison_df[["kelly_fraction", "expected_profit"]] = pd.DataFrame(
         results.tolist(), index=comparison_df.index
@@ -324,6 +342,7 @@ def determine_spot_position_and_save(
     ticker_symbol: str, sim_df: pd.DataFrame
 ) -> pd.DataFrame:
     """Spot positions with dynamic boundary tightening and path-aware Kelly."""
+    sim_df = prepare_path_matrix(sim_df, ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     spot_price = ticker.history(period="1d")["Close"].iloc[-1]
     last_date = sim_df.index.max()
