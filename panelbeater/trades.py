@@ -48,18 +48,29 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
         )
 
     # Find the current options prices
+    # Find the current options prices
     all_trades = []
     for ticker in tickers:
         print(f"Finding pricing options for {ticker}")
+
+        # 1. Define the columns we need to keep
+        price_col = f"PX_{ticker}"
+        required_cols = [price_col, SIMULATION_COLUMN]
+
+        # 2. Filter the MC dataframe but keep it as a DataFrame
+        # This ensures 'simulation' metadata travels with the prices
+        ticker_sim_data = df_mc[required_cols].copy()
+
         options_trades = find_mispriced_options_comprehensive(
             ticker,
-            df_mc[f"PX_{ticker}"].copy(),  # pyright: ignore
-        )  # pyright: ignore
+            ticker_sim_data,  # pyright: ignore
+        )
         if options_trades is not None:
             all_trades.append(options_trades)
+
         spot_trades = determine_spot_position_and_save(
             ticker,
-            df_mc[f"PX_{ticker}"].copy(),  # pyright: ignore
-        )  # pyright: ignore
+            ticker_sim_data,  # pyright: ignore
+        )
         all_trades.append(spot_trades)
     return pd.concat(all_trades, axis=0, ignore_index=True)

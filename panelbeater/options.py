@@ -9,30 +9,7 @@ import plotly.express as px
 import yfinance as yf
 from scipy.stats import norm
 
-
-def prepare_path_matrix(sim_df, ticker_symbol):
-    """
-    Pivots Long-format simulation into Wide-format paths.
-    """
-    # If a Series was passed, we can't pivot because we lost the 'simulation' IDs
-    if isinstance(sim_df, pd.Series):
-        raise ValueError(
-            "prepare_path_matrix requires the full DataFrame to access the 'simulation' column."
-        )
-
-    column_name = f"PX_{ticker_symbol}"
-
-    if column_name not in sim_df.columns:
-        # Fallback for ETH/BTC etc where the prefix might be different
-        possible_cols = [c for c in sim_df.columns if ticker_symbol in c]
-        if not possible_cols:
-            raise ValueError(f"Could not find price column for {ticker_symbol}")
-        column_name = possible_cols[0]
-
-    # The magic pivot: Rows become Dates, Columns become Simulation IDs
-    # [Image of pivoting a long-format dataframe into a wide-format matrix]
-    wide_df = sim_df.pivot(columns="simulation", values=column_name)
-    return wide_df
+from .sizing import calculate_path_aware_mean_variance, prepare_path_matrix
 
 
 def calculate_full_kelly_path_aware(row, sim_df):
@@ -356,7 +333,7 @@ def determine_spot_position_and_save(
 
     # 1. Transform Long -> Wide
     # This turns your stacked simulations into a 2D Path Matrix
-    wide_paths = prepare_path_matrix(sim_df.to_frame(), ticker_symbol)
+    wide_paths = prepare_path_matrix(sim_df, ticker_symbol)
 
     path_matrix = wide_paths.values  # Shape: (TimeSteps, NumSimulations)
     terminal_prices = path_matrix[-1]
@@ -376,41 +353,9 @@ def determine_spot_position_and_save(
     tp_level = np.percentile(terminal_prices, tp_pct)
     sl_level = np.percentile(terminal_prices, sl_pct)
 
-    # 3. Path-Aware Outcome Logic
-    path_outcomes = []
-    for col in range(path_matrix.shape[1]):
-        single_path = path_matrix[:, col]
-
-        hit_tp = np.where(
-            single_path >= tp_level if is_long else single_path <= tp_level
-        )[0]
-        hit_sl = np.where(
-            single_path <= sl_level if is_long else single_path >= sl_level
-        )[0]
-
-        first_tp = hit_tp[0] if len(hit_tp) > 0 else float("inf")
-        first_sl = hit_sl[0] if len(hit_sl) > 0 else float("inf")
-
-        if first_tp < first_sl:
-            path_outcomes.append((tp_level - spot_price) / spot_price)
-        elif first_sl < first_tp:
-            path_outcomes.append((sl_level - spot_price) / spot_price)
-        else:
-            path_outcomes.append((single_path[-1] - spot_price) / spot_price)
-
-    # 4. Variance-Aware Kelly: f* = E[r] / Var(r)
-    # [Image of Mean-Variance Optimization and Kelly Criterion relationship]
-    path_returns = np.array(path_outcomes)
-    actual_returns = path_returns if is_long else -path_returns
-
-    mean_r = np.mean(actual_returns)
-    var_r = np.var(actual_returns)
-
-    # Pure Kelly: f* = E[r] / Var(r)
-    if var_r > 0 and mean_r > 0:
-        kelly_size = mean_r / var_r
-    else:
-        kelly_size = 0
+    mean_r, _, kelly_size, actual_returns = calculate_path_aware_mean_variance(
+        path_matrix, spot_price, is_long, tp_level, sl_level
+    )
 
     # 4. Final Metadata and Save
     spot_data = [
@@ -441,6 +386,6 @@ def determine_spot_position_and_save(
     df.to_parquet(filename, engine="pyarrow", compression="snappy", index=False)
 
     print(
-        f"✅ Path-aware spot saved. Paths: {len(path_returns)}, Kelly: {kelly_size:.2%}"
+        f"✅ Path-aware spot saved. Paths: {len(actual_returns)}, Kelly: {kelly_size:.2%}"
     )
     return df
