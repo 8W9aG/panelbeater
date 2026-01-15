@@ -1,6 +1,6 @@
 """Synchronise the account to the latest information."""
 
-# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments,superfluous-parens
 import os
 import time
 
@@ -102,8 +102,21 @@ def sync_positions(df: pd.DataFrame):
 
 
 def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
-    """Uses advanced Bracket Orders (OTOCO) supported for Equities."""
-    print(f"[{symbol}] Executing Equity Bracket Order...")
+    """Uses advanced Bracket Orders (OTOCO) with validation fix."""
+
+    # Validation Check: Ensure TP and SL are on the correct side of each other
+    # for the given order side.
+    if side == OrderSide.BUY:
+        if not (tp > sl):
+            print(f"Error: For LONG {symbol}, TP ({tp}) must be > SL ({sl}). Skipping.")
+            return
+    elif side == OrderSide.SELL:
+        if not (tp < sl):
+            print(
+                f"Error: For SHORT {symbol}, TP ({tp}) must be < SL ({sl}). Skipping."
+            )
+            return
+
     order_req = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -113,7 +126,11 @@ def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
         take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
         stop_loss=StopLossRequest(stop_price=round(sl, 2)),
     )
-    trading_client.submit_order(order_req)
+
+    try:
+        trading_client.submit_order(order_req)
+    except Exception as e:
+        print(f"Bracket order failed for {symbol}: {e}")
 
 
 def execute_crypto_strategy(
