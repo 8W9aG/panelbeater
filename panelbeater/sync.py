@@ -15,92 +15,99 @@ from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest,
 
 # Minimum change in position (in USD) required to trigger a trade
 MIN_TRADE_USD = 50.0
+# Safety factor to account for Alpaca's 2% price collar on market orders
+SAFETY_FACTOR = 0.95
 
 
 def sync_positions(df: pd.DataFrame):
-    """Sync the portfolio to alpaca."""
+    """Sync the portfolio to alpaca with robust symbol and balance handling."""
     trading_client = TradingClient(
         os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=True
     )
     account = trading_client.get_account()
-    available_funds = float(account.buying_power)  # type: ignore
+
+    # Use 95% of Buying Power to avoid 'Insufficient Balance' due to 2% price collars
+    available_funds = float(account.buying_power) * SAFETY_FACTOR  # type: ignore
 
     total_conviction = df["kelly_fraction"].sum()
     df["target_usd"] = (df["kelly_fraction"] / total_conviction) * available_funds
 
-    positions = {p.symbol: p for p in trading_client.get_all_positions()}  # type: ignore
+    # NORMALIZE: Map 'BTCUSD' (position) to 'BTC/USD' (trading pair)
+    raw_positions = trading_client.get_all_positions()
+    positions = {}
+    for p in raw_positions:
+        sym = p.symbol  # type: ignore
+        if p.asset_class == "crypto" and "/" not in sym:  # type: ignore
+            # Convert 'BTCUSD' -> 'BTC/USD' for consistent matching
+            sym = sym.replace("USD", "/USD")
+        positions[sym] = p
 
     for _, row in df.iterrows():
-        ticker_raw = row["ticker"]
-        is_crypto = "-" in ticker_raw or "/" in ticker_raw
-        symbol = ticker_raw.replace("-", "").replace("/", "")  # pyright: ignore
+        # Standardize ticker to match Alpaca's / format for crypto (e.g. BTC/USD)
+        ticker_raw = row["ticker"].replace("-", "/")  # pyright: ignore
+        is_crypto = "/" in ticker_raw
+        symbol_for_position = ticker_raw.replace("/", "") if is_crypto else ticker_raw
 
         # 1. Determine Current State
-        price = (
-            float(positions[symbol].current_price)  # type: ignore
-            if symbol in positions
-            else float(row["ask"])
-        )
-        current_qty = float(positions[symbol].qty) if symbol in positions else 0.0  # type: ignore
+        # Check normalized dict first, then fall back to raw symbol
+        pos = positions.get(ticker_raw) or positions.get(symbol_for_position)
 
-        # 2. Calculate Target Quantity with Shorting Overrides
-        target_qty = row["target_usd"] / price
+        price = float(pos.current_price) if pos else float(row["ask"])  # type: ignore
+        current_qty = float(pos.qty) if pos else 0.0  # type: ignore
+        current_usd_value = current_qty * price
+
+        # 2. Calculate Target Quantity / Notional
+        target_usd = row["target_usd"]
 
         if row["type"] == "spot_short":
             if is_crypto:
                 # Alpaca Crypto is Long-Only; Short signals = Liquidate
-                target_qty = 0.0
+                target_usd = 0.0
             else:
                 # Equities can be shorted (requires Margin account)
-                target_qty = -target_qty
+                target_usd = -target_usd
 
-        # 3. Precision Rounding & Zero-Quantity Guard
-        diff_qty = target_qty - current_qty
-        trade_qty = abs(round(diff_qty, 4 if is_crypto else 0))  # pyright: ignore
+        # 3. Decision Logic based on Dollar Delta
+        # Using USD Delta is safer for balance checks than Qty Delta
+        diff_usd = target_usd - current_usd_value
 
-        # FIX: If trade_qty rounds to 0, or we are trying to 'short' from 0 balance
-        if trade_qty <= 0:
+        if abs(diff_usd) < MIN_TRADE_USD:
             print(
-                f"[{symbol}] No significant change needed or shorting from zero. Updating exits only."
+                f"[{ticker_raw}] Delta ${diff_usd:.2f} too small. Updating exits only."
             )
-            update_exits(symbol, row["tp_target"], row["sl_target"], trading_client)
-            continue
-
-        diff_usd = trade_qty * price
-        if diff_usd < MIN_TRADE_USD:
-            print(
-                f"[{symbol}] Change of ${diff_usd:.2f} too small. Updating exits only."
-            )
-            update_exits(symbol, row["tp_target"], row["sl_target"], trading_client)
+            update_exits(ticker_raw, row["tp_target"], row["sl_target"], trading_client)
             continue
 
         # 4. Clear Old Orders & Execute
-        clear_orders(symbol, trading_client)
-        side = OrderSide.BUY if diff_qty > 0 else OrderSide.SELL
+        clear_orders(ticker_raw, trading_client)
+        side = OrderSide.BUY if diff_usd > 0 else OrderSide.SELL
 
         if is_crypto:
             execute_crypto_strategy(
-                symbol,
-                trade_qty,
-                target_qty,
+                ticker_raw,
+                abs(diff_usd),
+                target_usd,
                 side,
                 row["tp_target"],
                 row["sl_target"],
                 trading_client,
             )
         else:
-            execute_equity_strategy(
-                symbol,
-                trade_qty,
-                side,
-                row["tp_target"],
-                row["sl_target"],
-                trading_client,
-            )
+            # Equities still use Quantity for non-fractional support
+            trade_qty = abs(round(diff_usd / price, 0))  # pyright: ignore
+            if trade_qty > 0:
+                execute_equity_strategy(
+                    ticker_raw,
+                    trade_qty,
+                    side,
+                    row["tp_target"],
+                    row["sl_target"],
+                    trading_client,
+                )
 
 
 def clear_orders(symbol, trading_client):
-    """Cancels all open orders for a symbol to avoid 'insufficient balance' conflicts."""
+    """Cancels all open orders for a symbol to avoid conflicts."""
     open_orders = trading_client.get_orders(
         GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
     )
@@ -109,24 +116,30 @@ def clear_orders(symbol, trading_client):
 
 
 def execute_crypto_strategy(
-    symbol, trade_qty, total_target_qty, side, tp, sl, trading_client
+    symbol, trade_notional, total_target_usd, side, tp, sl, trading_client
 ):
-    """Handles crypto as sequential orders (Entry -> TP/SL)."""
+    """Handles crypto using Notional values to satisfy price collars."""
     try:
+        # Use Notional for the entry to let Alpaca handle the collar/buffer
         trading_client.submit_order(
             MarketOrderRequest(
-                symbol=symbol, qty=trade_qty, side=side, time_in_force=TimeInForce.GTC
+                symbol=symbol,
+                notional=round(trade_notional, 2),
+                side=side,
+                time_in_force=TimeInForce.GTC,
             )
         )
 
-        # Skip TP/SL if we just liquidated the position
-        if total_target_qty == 0:
-            print(f"[{symbol}] Position closed. No exit orders set.")
+        if total_target_usd <= 0:
+            print(f"[{symbol}] Position liquidated. No exits set.")
             return
 
-        time.sleep(1.5)  # Wait for fill
-        exit_side = OrderSide.SELL if total_target_qty > 0 else OrderSide.BUY
-        abs_qty = abs(round(total_target_qty, 4))
+        time.sleep(2.0)  # Brief pause for order to fill and position to update
+
+        # Get new position to set accurate TP/SL quantities
+        new_pos = trading_client.get_open_position(symbol)
+        abs_qty = abs(float(new_pos.qty))
+        exit_side = OrderSide.SELL if float(new_pos.qty) > 0 else OrderSide.BUY
 
         trading_client.submit_order(
             LimitOrderRequest(
@@ -147,12 +160,19 @@ def execute_crypto_strategy(
             )
         )
     except Exception as e:
-        print(f"Crypto Trade failed: {e}")
+        print(f"Crypto Strategy failed for {symbol}: {e}")
 
 
 def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
     """Uses Bracket Orders for Equities."""
     try:
+        # Validation for Alpaca Bracket rules: Buy TP > SL, Sell TP < SL
+        if (side == OrderSide.BUY and tp <= sl) or (
+            side == OrderSide.SELL and tp >= sl
+        ):
+            print(f"[{symbol}] TP/SL validation failed. Skipping bracket.")
+            return
+
         order_req = MarketOrderRequest(
             symbol=symbol,
             qty=qty,

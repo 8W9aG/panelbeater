@@ -6,19 +6,19 @@ from panelbeater.sizing import prepare_path_matrix, calculate_path_aware_mean_va
 
 @pytest.fixture
 def mock_sim_df():
-    """Creates a mock long-format DataFrame like Panelbeater output."""
-    dates = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(10)]
-    # Two paths: Path 0 is a winner, Path 1 is a loser
+    """Creates mock data with future dates to avoid the <= 0 days exit."""
+    # Start dates from tomorrow so 'total_days' is always positive
+    start_date = datetime.now() + timedelta(days=1)
+    dates = [start_date + timedelta(days=i) for i in range(10)]
+    
     data = []
     for s in [0, 1]:
         for i, d in enumerate(dates):
-            # Simulation 0: Steady gain (+1 per day)
-            # Simulation 1: Steady loss (-1 per day)
+            # Path 0 goes up, Path 1 goes down
             price = 100 + (i if s == 0 else -i)
             data.append({'date': d, 'PX_QQQ': price, 'simulation': s})
     
-    df = pd.DataFrame(data).set_index('date')
-    return df
+    return pd.DataFrame(data).set_index('date')
 
 def test_prepare_path_matrix_dimensions(mock_sim_df):
     """Verify that long data pivots to (Time, Paths) wide data."""
@@ -69,3 +69,43 @@ def test_missing_simulation_column_raises_error():
     df = pd.DataFrame({'PX_QQQ': [100, 101]})
     with pytest.raises(KeyError, match="simulation"):
         prepare_path_matrix(df, "QQQ")
+
+def test_option_row_metadata_integrity():
+    """
+    Ensures that the option row passed to Kelly/Exits 
+    contains all required Black-Scholes parameters.
+    """
+    # Mock row missing IV
+    bad_row = pd.Series({
+        "strike": 100,
+        "expiry": "2026-06-01",
+        "type": "call",
+        "ask": 5.0
+        # missing impliedVolatility
+    })
+    
+    # This should fail if the key is missing
+    with pytest.raises(KeyError, match="impliedVolatility"):
+        iv = bad_row["impliedVolatility"]
+
+def test_distribution_exits_logic(mock_sim_df):
+    """
+    Test calculate_distribution_exits with a valid row.
+    """
+    from panelbeater.options import calculate_distribution_exits, prepare_path_matrix
+    
+    ticker = "QQQ"
+    wide_sim = prepare_path_matrix(mock_sim_df, ticker)
+    
+    valid_row = pd.Series({
+        "expiry": mock_sim_df.index.max().strftime("%Y-%m-%d"),
+        "strike": 100,
+        "ask": 5.0,
+        "type": "call",
+        "impliedVolatility": 0.25 # Valid metadata
+    })
+    
+    # This should now run without a KeyError
+    tp, sl = calculate_distribution_exits(valid_row, wide_sim)
+    assert tp > sl
+    assert tp > 0

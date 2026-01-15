@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import yfinance as yf
-from scipy.stats import norm
 
-from .sizing import calculate_path_aware_mean_variance, prepare_path_matrix
+from .sizing import (calculate_distribution_exits,
+                     calculate_path_aware_mean_variance, prepare_path_matrix)
 
 
 def calculate_full_kelly_path_aware(row, sim_df):
@@ -78,92 +78,6 @@ def calculate_full_kelly_path_aware(row, sim_df):
         f_star = 0
 
     return f_star, mean_r * entry_price
-
-
-def black_scholes_price(S, K, T, r, sigma, option_type="call"):
-    """
-    Vectorized Black-Scholes pricing for European options.
-
-    Parameters:
-    S (float or np.array): Current underlying price (or distribution of prices)
-    K (float): Strike price
-    T (float): Time to maturity in years (e.g., 0.5 for 6 months)
-    r (float): Risk-free interest rate (e.g., 0.04 for 4%)
-    sigma (float): Implied Volatility (e.g., 0.25 for 25%)
-    option_type (str): 'call' or 'put'
-    """
-    # Ensure T is non-zero to avoid division by zero errors at expiration
-    T = np.maximum(T, 1e-6)
-
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-
-    if option_type.lower() == "call":
-        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-    elif option_type.lower() == "put":
-        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-    else:
-        raise ValueError("option_type must be 'call' or 'put'")
-
-    return price
-
-
-def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
-    """
-    Calculates TP/SL based on dynamic percentiles derived from
-    the variance of the predicted option distribution.
-    """
-    date_val = row["expiry"]
-
-    # 1. Lookup prices for specific expiry
-    if date_val not in sim_df.index:
-        target_lookup = pd.to_datetime(date_val)
-        sim_prices = sim_df.loc[target_lookup].values
-    else:
-        sim_prices = sim_df.loc[date_val].values
-
-    # 2. Time to Horizon calculation
-    today = datetime.now()
-    expiry_date = datetime.strptime(row["expiry"], "%Y-%m-%d")
-    total_days = (expiry_date - today).days
-
-    if total_days <= 0:
-        return row["ask"], row["ask"]
-
-    days_to_horizon = total_days * horizon_pct
-    time_to_expiry_at_horizon = (total_days - days_to_horizon) / 365.0
-
-    # 3. Simulate OPTION prices across all paths
-    predicted_option_values = black_scholes_price(
-        sim_prices,
-        row["strike"],
-        time_to_expiry_at_horizon,
-        0.04,
-        row["impliedVolatility"],
-        row["type"],
-    )
-
-    # 4. DYNAMIC LOGIC: Adjust percentiles based on Option CV
-    # CV = Standard Deviation / Mean
-    opt_mean = np.mean(predicted_option_values)
-    opt_std = np.std(predicted_option_values)
-
-    # If mean is 0 (deep OTM), we can't calculate CV, so default to tightest
-    if opt_mean <= 0.01:
-        tp_pct, sl_pct = 75, 25
-    else:
-        cv = opt_std / opt_mean
-        # As CV increases, we pull percentiles toward the median (50)
-        # Low CV (high confidence): 90/10
-        # High CV (low confidence): 70/30
-        spread_modifier = np.clip(20 * cv, 5, 20)
-        tp_pct = 90 - spread_modifier
-        sl_pct = 10 + spread_modifier
-
-    tp = np.percentile(predicted_option_values, tp_pct)
-    sl = np.percentile(predicted_option_values, sl_pct)
-
-    return tp, sl
 
 
 def find_mispriced_options_comprehensive(
@@ -245,7 +159,7 @@ def find_mispriced_options_comprehensive(
                     "model_prob": model_prob,
                     "tp_target": tp_target,
                     "sl_target": sl_target,
-                    "iv": row["impliedVolatility"],
+                    "impliedVolatility": row["impliedVolatility"],
                 }
             )
 
