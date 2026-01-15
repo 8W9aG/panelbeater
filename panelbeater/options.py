@@ -1,6 +1,6 @@
 """Process the options for the assets."""
 
-# pylint: disable=too-many-locals,consider-using-f-string,use-dict-literal,invalid-name,too-many-arguments,too-many-positional-arguments,too-many-statements,line-too-long,bare-except
+# pylint: disable=too-many-locals,consider-using-f-string,use-dict-literal,invalid-name,too-many-arguments,too-many-positional-arguments,too-many-statements,line-too-long,bare-except,too-many-branches
 from datetime import datetime
 
 import numpy as np
@@ -329,9 +329,23 @@ def determine_spot_position_and_save(
     last_date = sim_df.index.max()
     date_str = last_date.strftime("%Y-%m-%d")  # pyright: ignore
 
-    # Force path_matrix to be 2D (Rows: Time, Cols: Paths)
-    # This prevents the IndexError if sim_df has unexpected dimensions
-    path_matrix = np.atleast_2d(sim_df.values)
+    # 1. Force the matrix into the correct shape
+    # We want Rows = Time, Columns = Paths
+    raw_values = sim_df.values
+
+    if raw_values.ndim == 1:
+        # If it's a single path, it was likely a Series.
+        # We need to reshape it back to (Length, 1)
+        path_matrix = raw_values.reshape(-1, 1)
+    else:
+        path_matrix = raw_values
+
+    num_paths = path_matrix.shape[1]
+
+    # DEBUG PRINT: Check what is actually coming in
+    print(
+        f"DEBUG: sim_df shape: {sim_df.shape}, Path Matrix shape: {path_matrix.shape}"
+    )
 
     # If sim_df was (N, 1), path_matrix is (N, 1).
     # If sim_df was just (N,), path_matrix becomes (1, N). We need (N, 1) or (N, M).

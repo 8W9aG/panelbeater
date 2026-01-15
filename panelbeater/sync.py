@@ -18,14 +18,10 @@ MIN_TRADE_USD = 50.0
 
 
 def sync_positions(df: pd.DataFrame):
-    """
-    Main entry point to sync a model DataFrame with Alpaca.
-    Handles scaling, equity vs crypto logic, and bracket management.
-    """
+    """Sync the portfolio to alpaca."""
     trading_client = TradingClient(
         os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=True
     )
-    # 1. Determine Capital Allocation
     account = trading_client.get_account()
     available_funds = float(account.buying_power)  # type: ignore
 
@@ -37,9 +33,9 @@ def sync_positions(df: pd.DataFrame):
     for _, row in df.iterrows():
         ticker_raw = row["ticker"]
         is_crypto = "-" in ticker_raw or "/" in ticker_raw
-        symbol = ticker_raw.replace("-", "")  # pyright: ignore
+        symbol = ticker_raw.replace("-", "").replace("/", "")  # pyright: ignore
 
-        # Get Current State
+        # 1. Determine Current State
         price = (
             float(positions[symbol].current_price)  # type: ignore
             if symbol in positions
@@ -47,47 +43,40 @@ def sync_positions(df: pd.DataFrame):
         )
         current_qty = float(positions[symbol].qty) if symbol in positions else 0.0  # type: ignore
 
-        # Calculate Target Quantity
+        # 2. Calculate Target Quantity with Shorting Overrides
         target_qty = row["target_usd"] / price
 
-        # --- SHORTING LOGIC OVERRIDE ---
         if row["type"] == "spot_short":
             if is_crypto:
-                print(
-                    f"[{symbol}] Alpaca doesn't support Crypto shorting. Setting target to 0 (Exit)."
-                )
+                # Alpaca Crypto is Long-Only; Short signals = Liquidate
                 target_qty = 0.0
             else:
-                target_qty = -target_qty  # Equities can be negative if Margin > $2000
+                # Equities can be shorted (requires Margin account)
+                target_qty = -target_qty
 
-        # --- SELL SAFETY CHECK (For Crypto) ---
+        # 3. Precision Rounding & Zero-Quantity Guard
         diff_qty = target_qty - current_qty
+        trade_qty = abs(round(diff_qty, 4 if is_crypto else 0))  # pyright: ignore
 
-        if is_crypto and diff_qty < 0:
-            # If we are selling, don't try to sell more than we own
-            # This prevents the 'requested: X, available: Y' error
-            max_sellable = current_qty
-            if abs(diff_qty) > max_sellable:
-                print(f"[{symbol}] Capping sell to available balance: {max_sellable}")
-                diff_qty = -max_sellable
-
-        diff_usd = abs(diff_qty * price)
-
-        if diff_usd < MIN_TRADE_USD:
+        # FIX: If trade_qty rounds to 0, or we are trying to 'short' from 0 balance
+        if trade_qty <= 0:
+            print(
+                f"[{symbol}] No significant change needed or shorting from zero. Updating exits only."
+            )
             update_exits(symbol, row["tp_target"], row["sl_target"], trading_client)
             continue
 
-        # 4. Clear Old Orders
-        # We must cancel existing exit orders before changing position size
-        open_orders = trading_client.get_orders(
-            GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])  # pyright: ignore
-        )
-        for order in open_orders:
-            trading_client.cancel_order_by_id(order.id)  # type: ignore
+        diff_usd = trade_qty * price
+        if diff_usd < MIN_TRADE_USD:
+            print(
+                f"[{symbol}] Change of ${diff_usd:.2f} too small. Updating exits only."
+            )
+            update_exits(symbol, row["tp_target"], row["sl_target"], trading_client)
+            continue
 
-        # 5. Execute Strategy
+        # 4. Clear Old Orders & Execute
+        clear_orders(symbol, trading_client)
         side = OrderSide.BUY if diff_qty > 0 else OrderSide.SELL
-        trade_qty = abs(round(diff_qty, 4 if is_crypto else 0))  # pyright: ignore
 
         if is_crypto:
             execute_crypto_strategy(
@@ -110,80 +99,72 @@ def sync_positions(df: pd.DataFrame):
             )
 
 
-def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
-    """Uses advanced Bracket Orders (OTOCO) with validation fix."""
-
-    # Validation Check: Ensure TP and SL are on the correct side of each other
-    # for the given order side.
-    if side == OrderSide.BUY:
-        if not (tp > sl):
-            print(f"Error: For LONG {symbol}, TP ({tp}) must be > SL ({sl}). Skipping.")
-            return
-    elif side == OrderSide.SELL:
-        if not (tp < sl):
-            print(
-                f"Error: For SHORT {symbol}, TP ({tp}) must be < SL ({sl}). Skipping."
-            )
-            return
-
-    order_req = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        time_in_force=TimeInForce.GTC,
-        order_class=OrderClass.BRACKET,
-        take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
-        stop_loss=StopLossRequest(stop_price=round(sl, 2)),
+def clear_orders(symbol, trading_client):
+    """Cancels all open orders for a symbol to avoid 'insufficient balance' conflicts."""
+    open_orders = trading_client.get_orders(
+        GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
     )
-
-    try:
-        trading_client.submit_order(order_req)
-    except Exception as e:
-        print(f"Bracket order failed for {symbol}: {e}")
+    for order in open_orders:
+        trading_client.cancel_order_by_id(order.id)
 
 
 def execute_crypto_strategy(
     symbol, trade_qty, total_target_qty, side, tp, sl, trading_client
 ):
-    """Executes sequential orders because Crypto doesn't support Bracket Orders."""
-    print(f"[{symbol}] Executing Crypto Sequential Orders...")
+    """Handles crypto as sequential orders (Entry -> TP/SL)."""
     try:
-        # Step 1: Market Order
         trading_client.submit_order(
             MarketOrderRequest(
                 symbol=symbol, qty=trade_qty, side=side, time_in_force=TimeInForce.GTC
             )
         )
 
-        # Step 2: Brief pause to allow for execution
-        time.sleep(1.5)
+        # Skip TP/SL if we just liquidated the position
+        if total_target_qty == 0:
+            print(f"[{symbol}] Position closed. No exit orders set.")
+            return
 
-        # Step 3: Set independent TP/SL based on the NEW total position
+        time.sleep(1.5)  # Wait for fill
         exit_side = OrderSide.SELL if total_target_qty > 0 else OrderSide.BUY
-        abs_target_qty = abs(round(total_target_qty, 4))
+        abs_qty = abs(round(total_target_qty, 4))
 
-        # Take Profit
         trading_client.submit_order(
             LimitOrderRequest(
                 symbol=symbol,
-                qty=abs_target_qty,
+                qty=abs_qty,
                 side=exit_side,
                 limit_price=round(tp, 2),
                 time_in_force=TimeInForce.GTC,
             )
         )
-        # Stop Loss
         trading_client.submit_order(
             StopOrderRequest(
                 symbol=symbol,
-                qty=abs_target_qty,
+                qty=abs_qty,
                 side=exit_side,
                 stop_price=round(sl, 2),
                 time_in_force=TimeInForce.GTC,
             )
         )
     except Exception as e:
-        print(f"Crypto execution error: {e}")
+        print(f"Crypto Trade failed: {e}")
+
+
+def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
+    """Uses Bracket Orders for Equities."""
+    try:
+        order_req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
+            stop_loss=StopLossRequest(stop_price=round(sl, 2)),
+        )
+        trading_client.submit_order(order_req)
+    except Exception as e:
+        print(f"Equity Trade failed: {e}")
 
 
 def update_exits(symbol, model_tp, model_sl, trading_client):
