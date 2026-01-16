@@ -20,90 +20,100 @@ SAFETY_FACTOR = 0.95
 
 
 def sync_positions(df: pd.DataFrame):
-    """Sync the portfolio to alpaca with robust symbol and balance handling."""
+    """Sync the portfolio, now with explicit Options and Crypto/Equity handling."""
     trading_client = TradingClient(
         os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=True
     )
     account = trading_client.get_account()
-
-    # Use 95% of Buying Power to avoid 'Insufficient Balance' due to 2% price collars
     available_funds = float(account.buying_power) * SAFETY_FACTOR  # type: ignore
 
     total_conviction = df["kelly_fraction"].sum()
-    df["target_usd"] = (df["kelly_fraction"] / total_conviction) * available_funds
+    # Handle the case where total_conviction is 0 to avoid DivisionByZero
+    if total_conviction > 0:
+        df["target_usd"] = (df["kelly_fraction"] / total_conviction) * available_funds
+    else:
+        df["target_usd"] = 0.0
 
-    # NORMALIZE: Map 'BTCUSD' (position) to 'BTC/USD' (trading pair)
+    # Get all positions (Equities, Crypto, and Options)
     raw_positions = trading_client.get_all_positions()
-    positions = {}
-    for p in raw_positions:
-        sym = p.symbol  # type: ignore
-        if p.asset_class == "crypto" and "/" not in sym:  # type: ignore
-            # Convert 'BTCUSD' -> 'BTC/USD' for consistent matching
-            sym = sym.replace("USD", "/USD")
-        positions[sym] = p
+    positions = {p.symbol: p for p in raw_positions}  # type: ignore
 
     for _, row in df.iterrows():
-        # Standardize ticker to match Alpaca's / format for crypto (e.g. BTC/USD)
-        ticker_raw = row["ticker"].replace("-", "/")  # pyright: ignore
-        is_crypto = "/" in ticker_raw
-        symbol_for_position = ticker_raw.replace("/", "") if is_crypto else ticker_raw
+        # --- THE FIX: IDENTIFY THE CORRECT SYMBOL ---
+        # If option_symbol is present and not null, use it.
+        is_option = pd.notna(row.get("option_symbol")) and row.get(
+            "option_symbol"
+        ) != row.get("ticker")
+        symbol = row["option_symbol"] if is_option else row["ticker"]  # pyright: ignore
+
+        # Standardize for Crypto detection
+        is_crypto = "-" in symbol or "/" in symbol
+        trade_symbol = symbol.replace("-", "/") if is_crypto else symbol  # pyright: ignore
 
         # 1. Determine Current State
-        # Check normalized dict first, then fall back to raw symbol
-        pos = positions.get(ticker_raw) or positions.get(symbol_for_position)
+        # Position symbols in Alpaca for options match the OCC format (e.g., SPY260115C00640000)
+        pos = positions.get(symbol.replace("/", "").replace("-", ""))  # pyright: ignore
 
         price = float(pos.current_price) if pos else float(row["ask"])  # type: ignore
         current_qty = float(pos.qty) if pos else 0.0  # type: ignore
-        current_usd_value = current_qty * price
 
-        # 2. Calculate Target Quantity / Notional
-        target_usd = row["target_usd"]
+        # 2. Calculate Target Quantity
+        # Note: For options, the price is per share. 1 contract = 100 shares.
+        # target_qty here is the number of CONTRACTS.
+        multiplier = 100.0 if is_option else 1.0  # pyright: ignore
+        target_qty = row["target_usd"] / (price * multiplier)
 
-        if row["type"] == "spot_short":
+        if row["type"] in ["spot_short", "put_short", "call_short"]:
             if is_crypto:
-                # Alpaca Crypto is Long-Only; Short signals = Liquidate
-                target_usd = 0.0
+                target_qty = 0.0
             else:
-                # Equities can be shorted (requires Margin account)
-                target_usd = -target_usd
+                target_qty = -target_qty
 
-        # 3. Decision Logic based on Dollar Delta
-        # Using USD Delta is safer for balance checks than Qty Delta
+        # 3. Decision Logic (USD Delta)
+        current_usd_value = current_qty * price * multiplier
+        if row["type"] == "spot_short" and is_crypto:
+            target_usd = 0.0  # Force liquidation for crypto shorts
+        else:
+            target_usd = row["target_usd"]
+
+        # Calculate the actual change needed
         diff_usd = target_usd - current_usd_value
 
         if abs(diff_usd) < MIN_TRADE_USD:
-            print(
-                f"[{ticker_raw}] Delta ${diff_usd:.2f} too small. Updating exits only."
+            update_exits(
+                trade_symbol, row["tp_target"], row["sl_target"], trading_client
             )
-            update_exits(ticker_raw, row["tp_target"], row["sl_target"], trading_client)
             continue
 
-        # 4. Clear Old Orders & Execute
-        clear_orders(ticker_raw, trading_client)
+        # 4. Execute
+        clear_orders(trade_symbol, trading_client)
         side = OrderSide.BUY if diff_usd > 0 else OrderSide.SELL
 
         if is_crypto:
             execute_crypto_strategy(
-                ticker_raw,
-                abs(diff_usd),
-                target_usd,
+                symbol=trade_symbol,  # e.g., 'BTC/USD'
+                trade_notional=abs(diff_usd),  # The dollar amount to buy/sell now
+                total_target_usd=row[
+                    "target_usd"
+                ],  # The total dollar value we want to guard
+                side=side,  # OrderSide.BUY or OrderSide.SELL
+                tp=row["tp_target"],  # Take profit price
+                sl=row["sl_target"],  # Stop loss price
+                trading_client=trading_client,  # The active TradingClient instance
+            )
+        elif is_option:  # pyright: ignore
+            execute_option_strategy(
+                trade_symbol, abs(round(target_qty, 0)), side, trading_client
+            )
+        else:
+            execute_equity_strategy(
+                trade_symbol,
+                abs(round(target_qty, 0)),
                 side,
                 row["tp_target"],
                 row["sl_target"],
                 trading_client,
             )
-        else:
-            # Equities still use Quantity for non-fractional support
-            trade_qty = abs(round(diff_usd / price, 0))  # pyright: ignore
-            if trade_qty > 0:
-                execute_equity_strategy(
-                    ticker_raw,
-                    trade_qty,
-                    side,
-                    row["tp_target"],
-                    row["sl_target"],
-                    trading_client,
-                )
 
 
 def clear_orders(symbol, trading_client):
@@ -204,3 +214,22 @@ def update_exits(symbol, model_tp, model_sl, trading_client):
                 )
         except Exception as e:
             print(f"Update failed for {symbol}: {e}")
+
+
+def execute_option_strategy(symbol, qty, side, trading_client):
+    """Specific execution for Options."""
+    try:
+        # Options currently DO NOT support Bracket Orders in Alpaca
+        # We must use sequential orders similar to Crypto
+        trading_client.submit_order(
+            MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.GTC,
+            )
+        )
+        print(f"[OPTION] {side} {qty} {symbol}")
+        # Note: You can add TP/SL limit orders here after a brief sleep
+    except Exception as e:
+        print(f"Option Trade failed for {symbol}: {e}")

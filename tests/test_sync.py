@@ -111,15 +111,47 @@ def test_crypto_short_liquidation(mock_alpaca_client):
     
     sync_positions(df)
 
-    # 1. Capture the call arguments
-    # call_args returns a tuple (args, kwargs)
-    args, kwargs = mock_alpaca_client.submit_order.call_args
-    
-    # 2. Extract the request object from positional arguments
-    # Since it was called as submit_order(MarketOrderRequest(...)), it's in args[0]
+    # FIX: Access the call history list instead of just the last call
+    # [0] is the Market Order, [1] is Limit, [2] is Stop
+    args, kwargs = mock_alpaca_client.submit_order.call_args_list[0]
     order_req = args[0]
-    
+
     # 3. Assert on the request object properties
     assert order_req.side == OrderSide.SELL
-    # Since it's crypto in your latest script, you likely use notional
+    # Now notional will correctly be 30000.0
     assert order_req.notional == 30000.0
+
+def test_option_symbol_and_multiplier(mock_alpaca_client):
+    """Verifies that option_symbol is used and the 100x multiplier is applied."""
+    # We set a target of $10,652 for this specific call option
+    # At an ask of $53.26, this should result in exactly 2 contracts
+    # Calculation: 10652 / (53.26 * 100) = 2.0
+    df = pd.DataFrame({
+        'ticker': ['SPY'],
+        'option_symbol': ['SPY260115C00640000'],
+        'kelly_fraction': [1.0],
+        'type': ['call'],
+        'ask': [53.26],
+        'tp_target': [60.0],
+        'sl_target': [40.0]
+    })
+
+    # Mock buying power so that 100% Kelly = $10,652 (after 0.95 safety)
+    # 10652 / 0.95 = 11212.63
+    mock_account = MagicMock()
+    mock_account.buying_power = "11212.63"
+    mock_alpaca_client.get_account.return_value = mock_account
+    
+    mock_alpaca_client.get_all_positions.return_value = []
+
+    sync_positions(df)
+
+    # Capture the call to submit_order
+    # Based on the sync logic, options use execute_option_strategy (MarketOrder)
+    args, _ = mock_alpaca_client.submit_order.call_args_list[0]
+    order_req = args[0]
+
+    # ASSERTIONS
+    assert order_req.symbol == 'SPY260115C00640000'
+    assert order_req.qty == 2.0  # (Target $10,652 / $5,326 per contract)
+    assert order_req.side == OrderSide.BUY
