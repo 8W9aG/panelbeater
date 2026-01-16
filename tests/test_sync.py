@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch
-from alpaca.trading.enums import OrderSide
+from alpaca.trading.enums import OrderSide, TimeInForce
 from panelbeater.sync import sync_positions  # Adjust import based on your file structure
 
 @pytest.fixture
@@ -155,3 +155,19 @@ def test_option_symbol_and_multiplier(mock_alpaca_client):
     assert order_req.symbol == 'SPY260115C00640000'
     assert order_req.qty == 2.0  # (Target $10,652 / $5,326 per contract)
     assert order_req.side == OrderSide.BUY
+
+def test_option_uses_day_tif(mock_alpaca_client):
+    df = pd.DataFrame({
+        'ticker': ['SPY'],
+        'option_symbol': ['SPY260115C00640000'],
+        'kelly_fraction': [1.0],
+        'type': ['call'],
+        'ask': [53.26],
+        'tp_target': [60.0], 'sl_target': [40.0]
+    })
+    
+    sync_positions(df)
+    
+    # Check that the first order (entry) used DAY
+    entry_order = mock_alpaca_client.submit_order.call_args_list[0].args[0]
+    assert entry_order.time_in_force == TimeInForce.DAY

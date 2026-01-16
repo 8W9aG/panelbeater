@@ -6,8 +6,8 @@ import time
 
 import pandas as pd
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import (OrderClass, OrderSide, QueryOrderStatus,
-                                  TimeInForce)
+from alpaca.trading.enums import (OrderClass, OrderSide, OrderType,
+                                  QueryOrderStatus, TimeInForce)
 from alpaca.trading.requests import (GetOrdersRequest, LimitOrderRequest,
                                      MarketOrderRequest, ReplaceOrderRequest,
                                      StopLossRequest, StopOrderRequest,
@@ -103,7 +103,12 @@ def sync_positions(df: pd.DataFrame):
             )
         elif is_option:  # pyright: ignore
             execute_option_strategy(
-                trade_symbol, abs(round(target_qty, 0)), side, trading_client
+                trade_symbol,
+                abs(round(target_qty, 0)),
+                side,
+                row["tp_target"],
+                row["sl_target"],
+                trading_client,
             )
         else:
             execute_equity_strategy(
@@ -198,38 +203,89 @@ def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
 
 
 def update_exits(symbol, model_tp, model_sl, trading_client):
-    """Replaces open exit orders with updated model targets."""
+    """Replaces open exit orders with refined logic for options and threshold sensitivity."""
+    # Determine sensitivity: 0.01 for options/low-price, 0.5 for others
+    is_option = len(symbol) > 12
+    threshold = 0.01 if is_option else 0.25
+
     open_orders = trading_client.get_orders(
         GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
     )
+
     for order in open_orders:
         try:
-            if order.type == "limit" and abs(float(order.limit_price) - model_tp) > 0.5:
-                trading_client.replace_order_by_id(
-                    order.id, ReplaceOrderRequest(limit_price=round(model_tp, 2))
-                )
-            elif order.type == "stop" and abs(float(order.stop_price) - model_sl) > 0.5:
-                trading_client.replace_order_by_id(
-                    order.id, ReplaceOrderRequest(stop_price=round(model_sl, 2))
-                )
+            # 1. Update Take Profit (Limit Orders)
+            if order.type == OrderType.LIMIT and model_tp > 0:
+                if abs(float(order.limit_price) - model_tp) > threshold:
+                    print(f"[{symbol}] Updating TP to {model_tp}")
+                    trading_client.replace_order_by_id(
+                        order.id, ReplaceOrderRequest(limit_price=round(model_tp, 2))
+                    )
+
+            # 2. Update Stop Loss (Stop or Stop-Limit Orders)
+            elif order.type in [OrderType.STOP, OrderType.STOP_LIMIT] and model_sl > 0:
+                # ReplaceOrderRequest uses 'stop_price' for both Stop and Stop-Limit types
+                if abs(float(order.stop_price) - model_sl) > threshold:
+                    print(f"[{symbol}] Updating SL to {model_sl}")
+                    trading_client.replace_order_by_id(
+                        order.id, ReplaceOrderRequest(stop_price=round(model_sl, 2))
+                    )
+
+            # 3. Handle 'Canceled' Signal
+            elif model_tp == 0 or model_sl == 0:
+                print(f"[{symbol}] Model target is 0. Canceling order {order.id}")
+                trading_client.cancel_order_by_id(order.id)
+
         except Exception as e:
-            print(f"Update failed for {symbol}: {e}")
+            # Common error: order is already 'pending_replace' or 'filled'
+            print(f"Update failed for {symbol} ({order.type}): {e}")
 
 
-def execute_option_strategy(symbol, qty, side, trading_client):
-    """Specific execution for Options."""
+def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
+    """Executes sequential orders for Options using DAY TimeInForce."""
+    print(f"[{symbol}] Executing Option Sequential Orders (TIF: DAY)...")
     try:
-        # Options currently DO NOT support Bracket Orders in Alpaca
-        # We must use sequential orders similar to Crypto
+        # Step 1: Market Order (Must be DAY)
         trading_client.submit_order(
             MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                time_in_force=TimeInForce.GTC,
+                time_in_force=TimeInForce.DAY,  # <--- FIX: Options require DAY
             )
         )
-        print(f"[OPTION] {side} {qty} {symbol}")
-        # Note: You can add TP/SL limit orders here after a brief sleep
+
+        # Step 2: Brief pause to allow for fill
+        time.sleep(2.0)
+
+        # Step 3: Set independent TP/SL based on the NEW total position
+        # Note: Some Alpaca accounts only support LIMIT orders for Options (No Stop orders)
+        # If StopOrder fails, you may need to monitor price and trigger a Market order manually.
+        new_pos = trading_client.get_open_position(symbol)
+        abs_qty = abs(float(new_pos.qty))
+        exit_side = OrderSide.SELL if float(new_pos.qty) > 0 else OrderSide.BUY
+
+        # Take Profit (Limit Order - MUST be DAY)
+        trading_client.submit_order(
+            LimitOrderRequest(
+                symbol=symbol,
+                qty=abs_qty,
+                side=exit_side,
+                limit_price=round(tp, 2),
+                time_in_force=TimeInForce.DAY,
+            )
+        )
+
+        # Stop Loss (Stop Order - MUST be DAY)
+        # WARNING: Check if your Alpaca account tier allows 'Stop' on options.
+        trading_client.submit_order(
+            StopOrderRequest(
+                symbol=symbol,
+                qty=abs_qty,
+                side=exit_side,
+                stop_price=round(sl, 2),
+                time_in_force=TimeInForce.DAY,
+            )
+        )
     except Exception as e:
-        print(f"Option Trade failed for {symbol}: {e}")
+        print(f"Option execution error: {e}")
