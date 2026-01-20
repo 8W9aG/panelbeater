@@ -1,10 +1,11 @@
 """Synchronise the account to the latest information."""
 
-# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments,superfluous-parens,line-too-long
+# pylint: disable=too-many-locals,broad-exception-caught,too-many-arguments,too-many-positional-arguments,superfluous-parens,line-too-long,too-many-branches
 import os
 import time
 
 import pandas as pd
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import (OrderClass, OrderSide, OrderType,
                                   QueryOrderStatus, TimeInForce)
@@ -24,6 +25,9 @@ def sync_positions(df: pd.DataFrame):
     trading_client = TradingClient(
         os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=True
     )
+    clock = trading_client.get_clock()
+    # Check if we should skip options entirely right now
+    is_market_open = clock.is_open  # type: ignore
     account = trading_client.get_account()
     available_funds = float(account.buying_power) * SAFETY_FACTOR  # type: ignore
 
@@ -44,6 +48,9 @@ def sync_positions(df: pd.DataFrame):
         is_option = pd.notna(row.get("option_symbol")) and row.get(
             "option_symbol"
         ) != row.get("ticker")
+        if is_option and not is_market_open:  # pyright: ignore
+            # Silent skip for options during off-hours
+            continue
         symbol = row["option_symbol"] if is_option else row["ticker"]  # pyright: ignore
 
         # Standardize for Crypto detection
@@ -242,7 +249,7 @@ def update_exits(symbol, model_tp, model_sl, trading_client):
 
 
 def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
-    """Executes sequential orders for Options using DAY TimeInForce."""
+    """Executes sequential orders for Options with market-hours error suppression."""
     print(f"[{symbol}] Executing Option Sequential Orders (TIF: DAY)...")
     try:
         # Step 1: Market Order (Must be DAY)
@@ -251,7 +258,7 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                time_in_force=TimeInForce.DAY,  # <--- FIX: Options require DAY
+                time_in_force=TimeInForce.DAY,
             )
         )
 
@@ -259,13 +266,11 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
         time.sleep(2.0)
 
         # Step 3: Set independent TP/SL based on the NEW total position
-        # Note: Some Alpaca accounts only support LIMIT orders for Options (No Stop orders)
-        # If StopOrder fails, you may need to monitor price and trigger a Market order manually.
         new_pos = trading_client.get_open_position(symbol)
         abs_qty = abs(float(new_pos.qty))
         exit_side = OrderSide.SELL if float(new_pos.qty) > 0 else OrderSide.BUY
 
-        # Take Profit (Limit Order - MUST be DAY)
+        # Take Profit (Limit Order)
         trading_client.submit_order(
             LimitOrderRequest(
                 symbol=symbol,
@@ -276,8 +281,7 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
             )
         )
 
-        # Stop Loss (Stop Order - MUST be DAY)
-        # WARNING: Check if your Alpaca account tier allows 'Stop' on options.
+        # Stop Loss (Stop Order)
         trading_client.submit_order(
             StopOrderRequest(
                 symbol=symbol,
@@ -287,5 +291,16 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
                 time_in_force=TimeInForce.DAY,
             )
         )
+
+    except APIError as e:
+        # Suppress the "market hours" error specifically
+        if e.code == 42210000 and "market hours" in str(e).lower():
+            # Silent return or a simple non-error print
+            print(f"[{symbol}] Trade skipped: Options market is closed.")
+            return
+        # Print other API-related errors normally
+        print(f"[{symbol}] Alpaca API Error: {e}")
+
     except Exception as e:
-        print(f"Option execution error: {e}")
+        # Catch unexpected non-API errors (e.g. connection issues)
+        print(f"[{symbol}] Unexpected execution error: {e}")

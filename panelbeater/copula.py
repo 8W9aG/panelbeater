@@ -1,6 +1,7 @@
 """Handle joint distributions."""
 
 # pylint: disable=too-many-locals,pointless-string-statement
+import hashlib
 import os
 import pickle
 import time
@@ -12,7 +13,9 @@ import pyvinecopulib as pv
 
 
 def _vine_filename(df_returns: pd.DataFrame) -> str:
-    struct_str = "-".join(sorted(df_returns.columns.values.tolist()))
+    struct_str = hashlib.md5(
+        "-".join(sorted(df_returns.columns.values.tolist())).encode("utf-8")
+    ).hexdigest()
     return f"market_structure_{struct_str}.pkl"
 
 

@@ -214,3 +214,5 @@ catboost_info
 market_structure*.json
 monte_carlo*.png
 kelly_conviction*.png
+market_structure*.pkl
+.DS_Store

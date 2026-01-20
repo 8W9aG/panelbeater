@@ -1,6 +1,6 @@
 """Handle generating trades."""
 
-# pylint: disable=use-dict-literal,line-too-long
+# pylint: disable=use-dict-literal,line-too-long,no-else-return
 import pandas as pd
 import tqdm
 
@@ -74,3 +74,67 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
         )
         all_trades.append(spot_trades)
     return pd.concat(all_trades, axis=0, ignore_index=True)
+
+
+def process_and_classify_trades(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the raw analysis into 'Actionable Opportunities' (Buy)
+    and 'Management Signals' (Hold/Sell).
+
+    Returns:
+        opportunities_df: Only trades with Positive EV and Kelly > 0
+        portfolio_view_df: All trades with added 'Recommendation' columns
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    processed_df = df.copy()
+
+    # 1. Calculate Expected Edge
+    # If this is negative, the market price is higher than our model's Take Profit
+    processed_df["upside_edge"] = (
+        processed_df["tp_target"] - processed_df["ask"]
+    ) / processed_df["ask"]
+
+    # 2. Assign Recommendations
+    def assign_action(row):
+        if row["kelly_fraction"] > 0 and row["upside_edge"] > 0:
+            return "BUY_NEW"
+        if row["upside_edge"] < 0:
+            return "OVERVALUED_SELL"  # Price is above our model's take profit
+        if row["kelly_fraction"] == 0:
+            return "AVOID_NO_EDGE"
+        return "HOLD"
+
+    processed_df["action"] = processed_df.apply(assign_action, axis=1)
+
+    # 3. Create the "New Money" DataFrame
+    # This is what you look at to open NEW trades
+    opportunities_df = processed_df[
+        (processed_df["action"] == "BUY_NEW")
+        & (processed_df["model_prob"] > 0.4)  # Optional: Safety filter
+    ].copy()
+
+    # Sort opportunities by Kelly conviction
+    opportunities_df = opportunities_df.sort_values(  # pyright: ignore
+        by="kelly_fraction", ascending=False
+    )
+
+    # 4. The Portfolio View (Keep everything, just organized)
+    portfolio_view_df = processed_df[  # pyright: ignore
+        [
+            "ticker",
+            "option_symbol",
+            "expiry",
+            "strike",
+            "type",
+            "ask",
+            "tp_target",
+            "sl_target",
+            "upside_edge",
+            "kelly_fraction",
+            "action",
+        ]
+    ].sort_values(by=["expiry", "strike"])
+
+    return opportunities_df, portfolio_view_df

@@ -17,28 +17,32 @@ _TICKERS = [
     "SPY",
     "QQQ",
     "EEM",
+    "HYG",
     # Commodities
     "GC=F",
     "CL=F",
     "SI=F",
     # FX
-    # "EURUSD=X",
-    # "USDJPY=X",
+    "EURUSD=X",
+    "USDJPY=X",
     # Crypto
-    # "BTC-USD",
-    # "ETH-USD",
+    "BTC-USD",
+    "ETH-USD",
 ]
 _MACROS = [
+    # FRED
     "GDP",
     "UNRATE",
     "CPIAUCSL",
     "FEDFUNDS",
     "DGS10",
     "T10Y2Y",
-    # "M2SL",
-    # "VIXCLS",
-    # "DTWEXBGS",
-    # "INDPRO",
+    "M2SL",
+    "VIXCLS",
+    "DTWEXBGS",
+    "INDPRO",
+    # Indexes
+    "^IRX",
 ]
 _WINDOWS = [
     5,
@@ -49,7 +53,7 @@ _WINDOWS = [
     200,
 ]
 _LAGS = [1, 3, 5, 10, 20, 30]
-_DAYS_OUT = 30
+_DAYS_OUT = 32
 _SIMS = 1000
 
 
