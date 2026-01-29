@@ -1,6 +1,6 @@
 """Sizing utility functions."""
 
-# pylint: disable=too-many-locals,invalid-name,too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-locals,invalid-name,too-many-arguments,too-many-positional-arguments,broad-exception-caught
 from datetime import datetime
 
 import numpy as np
@@ -81,38 +81,55 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
     Calculates TP/SL based on dynamic percentiles derived from
     the variance of the predicted option distribution.
     """
+    # 1. FIX: Anchor 'Today' to the simulation data, not the system clock.
+    # This prevents bugs during backtesting or weekend runs.
+    if isinstance(sim_df.index, pd.DatetimeIndex):
+        sim_start_date = sim_df.index[0]
+    else:
+        # Fallback if index is just integers (steps)
+        sim_start_date = datetime.now()
+
     date_val = row["expiry"]
 
-    # 1. Lookup prices for specific expiry
-    if date_val not in sim_df.index:
-        target_lookup = pd.to_datetime(date_val)
-        sim_prices = sim_df.loc[target_lookup].values
-    else:
+    # 2. Lookup prices for specific expiry
+    # Handle cases where expiry is slightly off-grid or missing
+    if date_val in sim_df.index:
         sim_prices = sim_df.loc[date_val].values
+    else:
+        try:
+            target_lookup = pd.to_datetime(date_val)
+            # If exact date missing, use nearest available index (optional robustness)
+            idx_loc = sim_df.index.get_indexer([target_lookup], method="nearest")[0]
+            sim_prices = sim_df.iloc[idx_loc].values
+        except Exception:
+            # Fallback if lookup fails completely
+            return row["ask"], row["ask"]
 
-    # 2. Time to Horizon calculation
-    today = datetime.now()
+    # 3. Time to Horizon calculation (Using Data Anchor)
     expiry_date = datetime.strptime(row["expiry"], "%Y-%m-%d")
-    total_days = (expiry_date - today).days
+
+    # Calculate days based on SIMULATION time, not REAL time
+    total_days = (expiry_date - sim_start_date).days
 
     if total_days <= 0:
         return row["ask"], row["ask"]
 
     days_to_horizon = total_days * horizon_pct
-    time_to_expiry_at_horizon = (total_days - days_to_horizon) / 365.0
 
-    # 3. Simulate OPTION prices across all paths
+    # Crucial: Ensure we don't pass negative time or zero time to Black Scholes
+    time_to_expiry_at_horizon = max((total_days - days_to_horizon) / 365.0, 0.001)
+
+    # 4. Simulate OPTION prices across all paths
     predicted_option_values = black_scholes_price(
         sim_prices,
         row["strike"],
         time_to_expiry_at_horizon,
-        0.04,
+        0.04,  # Consider passing risk_free_rate as a param if possible
         row["impliedVolatility"],
         row["type"],
     )
 
-    # 4. DYNAMIC LOGIC: Adjust percentiles based on Option CV
-    # CV = Standard Deviation / Mean
+    # 5. DYNAMIC LOGIC: Adjust percentiles based on Option CV
     opt_mean = np.mean(predicted_option_values)
     opt_std = np.std(predicted_option_values)
 

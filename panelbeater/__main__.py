@@ -1,6 +1,6 @@
 """The CLI for finding mispriced options."""
 
-# pylint: disable=too-many-locals,use-dict-literal,invalid-name
+# pylint: disable=too-many-locals,use-dict-literal,invalid-name,line-too-long
 import argparse
 
 import requests_cache
@@ -14,35 +14,36 @@ from .trades import trades
 
 _TICKERS = [
     # Equities
-    "SPY",
-    "QQQ",
-    "EEM",
-    "HYG",
+    "SPY",  # SPDR S&P 500 ETF
+    "QQQ",  # Invesco QQQ Trust
+    "EEM",  # iShares MSCI Emerging Markets ETF
+    "HYG",  # iShares iBoxx $ High Yield Corporate Bond ETF
+    "TLT",  # iShares 20+ Year Treasury Bond ETF
     # Commodities
-    "GC=F",
-    "CL=F",
-    "SI=F",
+    "GC=F",  # Gold
+    "CL=F",  # Crude Oil
+    "SI=F",  # Silver
     # FX
-    "EURUSD=X",
-    "USDJPY=X",
+    "EURUSD=X",  # EUR/USD
+    "USDJPY=X",  # USD/JPY
     # Crypto
-    "BTC-USD",
-    "ETH-USD",
+    "BTC-USD",  # Bitcoin USD Price
+    "ETH-USD",  # Ethereum USD Price
 ]
 _MACROS = [
     # FRED
-    "GDP",
-    "UNRATE",
-    "CPIAUCSL",
-    "FEDFUNDS",
-    "DGS10",
-    "T10Y2Y",
-    "M2SL",
-    "VIXCLS",
-    "DTWEXBGS",
-    "INDPRO",
+    "GDP",  # Gross Domestic Product
+    "UNRATE",  # Unemployment Rate
+    "CPIAUCSL",  # Consumer Price Index for All Urban Consumers: All Items in U.S. City Average
+    "FEDFUNDS",  # Federal Funds Effective Rate
+    "DGS10",  # Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity, Quoted on an Investment Basis
+    "T10Y2Y",  # 10-Year Treasury Constant Maturity Minus 2-Year Treasury Constant Maturity
+    "M2SL",  # M2
+    "VIXCLS",  # CBOE Volatility Index: VIX
+    "DTWEXBGS",  # Nominal Broad U.S. Dollar Index
+    "INDPRO",  # Industrial Production: Total Index
     # Indexes
-    "^IRX",
+    "^IRX",  # 13 WEEK TREASURY BILL
 ]
 _WINDOWS = [
     5,

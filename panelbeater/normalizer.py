@@ -18,17 +18,34 @@ def _is_float(s: str) -> bool:
 
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize the dataframe per column by z-score bucketing."""
-    df = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
-    mu = df.rolling(365).mean()
-    sigma = df.rolling(365).std()
-    df = ((((df - mu) / sigma) * 2.0).round() / 2.0).clip(-3, 3)
+
+    # 1. Calculate Percent Change (preserve this in a specific variable)
+    df_pct = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+
+    # 2. Calculate Statistics based on pct_change
+    mu = df_pct.rolling(365).mean()
+    sigma = df_pct.rolling(365).std()
+
+    # 3. Create the Normalized/Bucketed DataFrame (Z-scores)
+    # We use df_pct here, not the original df
+    df_norm = ((((df_pct - mu) / sigma) * 2.0).round() / 2.0).clip(-3, 3)
+
     dfs = []
-    for col in df.columns:
-        for unique_val in df[col].unique():
+    for col in df_norm.columns:
+        # A. Create the bucket columns (based on Z-score)
+        for unique_val in df_norm[col].unique():
             if math.isnan(unique_val):
                 continue
-            s = (df[col] == unique_val).rename(f"{col}_{unique_val}")
+            s = (df_norm[col] == unique_val).rename(f"{col}_{unique_val}")
             dfs.append(s)
+
+        # B. Create the specific 'null' column (based on raw pct_change)
+        # We look at df_pct to see if the change was exactly 0.0
+        s_null = pd.Series(
+            np.isclose(df_pct[col], 0.0), index=df_pct.index, name=f"{col}_null"
+        )
+        dfs.append(s_null)
+
     return pd.concat(dfs, axis=1)
 
 
@@ -87,6 +104,27 @@ def denormalize(
         upper_bound = highest_std + 0.25
         jittered_std = np.random.uniform(lower_bound, upper_bound)
         value = (jittered_std * sigma) + mu
+
+        if highest_std == 0.0:
+            # Construct the null probability column name
+            # Pattern: {col}_null_{PROBABILITY_COLUMN_PREFIX}
+            null_prefix = f"{col}_null_{PROBABILITY_COLUMN_PREFIX}"
+
+            # Find the matching column in 'cols'
+            possible_null_cols = [x for x in cols if x.startswith(null_prefix)]
+
+            if possible_null_cols:
+                # Select the correct column (handling versions/suffixes)
+                null_prob_col = sorted(possible_null_cols)[-1]
+
+                # Get the probability of being exactly null
+                null_prob = df[null_prob_col].dropna().iloc[-1]
+
+                # Run random check
+                # Note: We use standard random here to avoid consuming extra indices from u_sample
+                if np.random.uniform(0, 1) < null_prob:
+                    value = 0.0  # Force exact same price (0% change)
+
         df.loc[date_to_add, col] = y[col].iloc[-1] * (1.0 + value)
 
     return df[sorted(target_cols)]  # pyright: ignore

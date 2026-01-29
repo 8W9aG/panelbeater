@@ -4,10 +4,10 @@ from .download import download
 from .fit import fit
 from .simulate import SIMULATION_FILENAME, run_single_simulation, simulate
 from .sync import sync_positions
-from .trades import trades
+from .trades import process_and_classify_trades, trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.42"
+__VERSION__ = "0.2.43"
 __all__ = [
     "download",
     "fit",
@@ -17,4 +17,5 @@ __all__ = [
     "trades",
     "SIMULATION_FILENAME",
     "sync_positions",
+    "process_and_classify_trades",
 ]

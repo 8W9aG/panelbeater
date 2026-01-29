@@ -1,6 +1,6 @@
 """Kelly functions."""
 
-# pylint: disable=too-many-locals,too-many-branches
+# pylint: disable=too-many-locals,too-many-branches,line-too-long
 import numpy as np
 
 
@@ -15,6 +15,22 @@ def calculate_full_kelly_path_aware(row, sim_df):
     """
     entry_price = row["ask"]
     if entry_price <= 0:
+        return 0.0, 0.0
+
+    # Get current spot from the start of the simulation paths
+    current_spot = sim_df.iloc[0, 0] if not sim_df.empty else 0
+
+    intrinsic_value = 0.0
+    if row["type"] == "call":
+        intrinsic_value = max(0, current_spot - row["strike"])
+    elif row["type"] == "put":
+        intrinsic_value = max(0, row["strike"] - current_spot)
+
+    # If the option costs less than the cash you can get for it right now,
+    # it is a data error. This creates "risk-free" variance which breaks Kelly.
+    if entry_price < intrinsic_value:
+        # Log a warning if you have a logger, otherwise just return 0 leverage
+        # e.g., print(f"Arb detected on {row['symbol']}: Cost {entry_price} < Intrinsic {intrinsic_value}")
         return 0.0, 0.0
 
     # Do not recalculate using calculate_distribution_exits(row, sim_df)
@@ -71,7 +87,11 @@ def calculate_full_kelly_path_aware(row, sim_df):
     if var_r > 0 and mean_r > 0:
         f_star = mean_r / var_r
     else:
-        f_star = 0
+        f_star = 0.0
+
+    # SAFETY CAP: Never leverage more than X (e.g., 5.0) on a single option
+    # regardless of how good the math looks.
+    f_star = min(f_star, 5.0)
 
     # CHANGED: Return mean_r directly (e.g., 0.36 for 36%)
     # instead of mean_r * entry_price
