@@ -19,6 +19,7 @@ _TICKERS = [
     "EEM",  # iShares MSCI Emerging Markets ETF
     "HYG",  # iShares iBoxx $ High Yield Corporate Bond ETF
     "TLT",  # iShares 20+ Year Treasury Bond ETF
+    "SPYD",  # State Street SPDR Portfolio S&P 500 High Dividend ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil

@@ -81,42 +81,33 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
     Calculates TP/SL based on dynamic percentiles derived from
     the variance of the predicted option distribution.
     """
-    # 1. FIX: Anchor 'Today' to the simulation data, not the system clock.
-    # This prevents bugs during backtesting or weekend runs.
+    # 1. FIX: Anchor 'Today' to the simulation data
     if isinstance(sim_df.index, pd.DatetimeIndex):
         sim_start_date = sim_df.index[0]
     else:
-        # Fallback if index is just integers (steps)
         sim_start_date = datetime.now()
 
     date_val = row["expiry"]
 
     # 2. Lookup prices for specific expiry
-    # Handle cases where expiry is slightly off-grid or missing
     if date_val in sim_df.index:
         sim_prices = sim_df.loc[date_val].values
     else:
         try:
             target_lookup = pd.to_datetime(date_val)
-            # If exact date missing, use nearest available index (optional robustness)
             idx_loc = sim_df.index.get_indexer([target_lookup], method="nearest")[0]
             sim_prices = sim_df.iloc[idx_loc].values
         except Exception:
-            # Fallback if lookup fails completely
             return row["ask"], row["ask"]
 
-    # 3. Time to Horizon calculation (Using Data Anchor)
+    # 3. Time to Horizon calculation
     expiry_date = datetime.strptime(row["expiry"], "%Y-%m-%d")
-
-    # Calculate days based on SIMULATION time, not REAL time
     total_days = (expiry_date - sim_start_date).days
 
     if total_days <= 0:
         return row["ask"], row["ask"]
 
     days_to_horizon = total_days * horizon_pct
-
-    # Crucial: Ensure we don't pass negative time or zero time to Black Scholes
     time_to_expiry_at_horizon = max((total_days - days_to_horizon) / 365.0, 0.001)
 
     # 4. Simulate OPTION prices across all paths
@@ -124,29 +115,36 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
         sim_prices,
         row["strike"],
         time_to_expiry_at_horizon,
-        0.04,  # Consider passing risk_free_rate as a param if possible
+        0.04,
         row["impliedVolatility"],
         row["type"],
     )
 
-    # 5. DYNAMIC LOGIC: Adjust percentiles based on Option CV
-    opt_mean = np.mean(predicted_option_values)
-    opt_std = np.std(predicted_option_values)
+    # --- SAFETY FIX: Handle NaNs in prediction ---
+    # Filter out NaNs immediately. This handles failed pricing or bad simulation paths.
+    valid_values = predicted_option_values[~np.isnan(predicted_option_values)]
 
-    # If mean is 0 (deep OTM), we can't calculate CV, so default to tightest
+    # If all paths failed (empty array), fallback to current ask price to avoid crash
+    if len(valid_values) == 0:
+        return row["ask"], row["ask"]
+
+    # Use valid_values for statistics instead of the raw array containing NaNs
+    opt_mean = np.mean(valid_values)
+    opt_std = np.std(valid_values)
+    # ---------------------------------------------
+
+    # 5. DYNAMIC LOGIC: Adjust percentiles based on Option CV
     if opt_mean <= 0.01:
         tp_pct, sl_pct = 75, 25
     else:
         cv = opt_std / opt_mean
-        # As CV increases, we pull percentiles toward the median (50)
-        # Low CV (high confidence): 90/10
-        # High CV (low confidence): 70/30
         spread_modifier = np.clip(20 * cv, 5, 20)
         tp_pct = 90 - spread_modifier
         sl_pct = 10 + spread_modifier
 
-    tp = np.percentile(predicted_option_values, tp_pct)
-    sl = np.percentile(predicted_option_values, sl_pct)
+    # Calculate percentiles on valid_values only
+    tp = np.percentile(valid_values, tp_pct)
+    sl = np.percentile(valid_values, sl_pct)
 
     return tp, sl
 
