@@ -2,7 +2,8 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from panelbeater.sizing import prepare_path_matrix, calculate_path_aware_mean_variance
+from panelbeater.sizing import prepare_path_matrix, calculate_path_aware_mean_variance, apply_merton_jumps
+from scipy.stats import kurtosis
 
 @pytest.fixture
 def mock_sim_df():
@@ -109,3 +110,55 @@ def test_distribution_exits_logic(mock_sim_df):
     tp, sl = calculate_distribution_exits(valid_row, wide_sim)
     assert tp > sl
     assert tp > 0
+
+def test_merton_jumps_increase_tail_risk():
+    np.random.seed(42)
+    n_days, n_paths = 100, 1000
+    base_paths = np.full((n_days, n_paths), 100.0)
+    
+    # INCREASE intensity and size for the test
+    # lam=25.0 means ~1 jump every 10 days
+    # mu_j=-0.30 means 30% crashes
+    jumped_paths = apply_merton_jumps(
+        base_paths.copy(), 
+        dt=1/252, 
+        lam=25.0, 
+        mu_j=-0.3, 
+        sigma_j=0.1
+    )
+    
+    # Calculate log returns for better kurtosis measurement
+    # We look at the return from the start to the end of each path
+    final_returns = (jumped_paths[-1] - 100.0) / 100.0
+    
+    kurt = kurtosis(final_returns, fisher=False)
+    
+    # ASSERTIONS
+    print(f"DEBUG: Kurtosis is {kurt}")
+    assert kurt > 5.0, f"Expected fat tails, but got {kurt}"
+    assert np.min(final_returns) < -0.2, "Should see at least one major crash"
+
+def test_merton_jumps_increase_tail_risk_crypto():
+    np.random.seed(42)
+    n_days, n_paths = 100, 1000
+    base_paths = np.full((n_days, n_paths), 100.0)
+    
+    # dt = 1/365
+    # To see jumps in a 100-day window, we need lam to be high enough
+    # lam=50 means roughly 1 jump every 7 days
+    jumped_paths = apply_merton_jumps(
+        base_paths.copy(), 
+        days_per_year=365, 
+        lam=50.0, 
+        mu_j=-0.25, 
+        sigma_j=0.05
+    )
+    
+    final_returns = (jumped_paths[-1] - 100.0) / 100.0
+    kurt = kurtosis(final_returns, fisher=False)
+    
+    print(f"DEBUG: 365-day scaling Kurtosis: {kurt}")
+    
+    # Now that the 'lam' is high enough, Kurtosis should be well above 3.0
+    assert kurt > 5.0
+    assert np.min(final_returns) < -0.20

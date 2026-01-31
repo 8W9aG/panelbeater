@@ -9,7 +9,7 @@ import plotly.express as px
 import yfinance as yf
 
 from .kelly import calculate_full_kelly_path_aware
-from .sizing import (calculate_distribution_exits,
+from .sizing import (apply_merton_jumps, calculate_distribution_exits,
                      calculate_path_aware_mean_variance, prepare_path_matrix)
 
 
@@ -46,18 +46,32 @@ def find_mispriced_options_comprehensive(
         full_chain = pd.concat([calls, puts])
 
         # --- LIQUIDITY FILTER START ---
-        # Filter for options that actually trade.
-        # Threshold: Open Interest > 50 AND Volume > 5 (Adjust as needed)
+        # 1. Basic Volume/Interest Check
         full_chain = full_chain[
             (full_chain["openInterest"] > 50)
-            & (full_chain["volume"] >= 5)  # Change to > 0 for strictly active today
-            & (full_chain["ask"] > 0.05)  # Ignore "worthless" deep OTM scrap
+            & (full_chain["volume"] >= 5)
+            & (full_chain["ask"] > 0.05)
         ].copy()
+
+        # 2. Calculate Relative Spread (The "Fishy" Detector)
+        # (Ask - Bid) / Ask gives us the % cost to cross the spread immediately
+        full_chain["rel_spread"] = (full_chain["ask"] - full_chain["bid"]) / full_chain[
+            "ask"
+        ]
+
+        # 3. Filter for Liquidity
+        # Threshold: 0.10 (10%). If it costs >10% just to enter, Kelly will be distorted.
+        full_chain = full_chain[full_chain["rel_spread"] <= 0.10].copy()
+
+        # 4. Realistic Entry Price
+        # Instead of using the raw 'Ask', we use a mid-point or a slightly penalized Ask
+        # to ensure the Kelly math isn't too optimistic.
+        full_chain["effective_entry"] = full_chain["ask"]
         # --- LIQUIDITY FILTER END ---
 
         model_prices_at_t = sim_df.loc[date_str].values
 
-        for _, row in full_chain.iterrows():
+        for _, row in full_chain.iterrows():  # pyright: ignore
             k = row["strike"]
             ask = row["ask"]
             bid = row["bid"]
@@ -88,7 +102,7 @@ def find_mispriced_options_comprehensive(
                     "type": row["type"],
                     "is_itm": is_itm,
                     "entry_range": f"${bid:.2f} - ${ask:.2f}",
-                    "ask": ask,
+                    "ask": (bid + ask) / 2 * 1.02,
                     "model_prob": model_prob,
                     "tp_target": tp_target,
                     "sl_target": sl_target,
@@ -103,7 +117,17 @@ def find_mispriced_options_comprehensive(
 
     # Calculate Kelly
     wide_sim_df = prepare_path_matrix(sim_df, ticker_symbol)
-    print(f"DEBUG: Wide Matrix Shape: {wide_sim_df.shape}")
+
+    # Apply the Black Swan "Truth Serum"
+    # lam=1.0 means we expect 1 significant jump per year on average
+    path_values = apply_merton_jumps(
+        wide_sim_df.values, days_per_year=365, lam=1.0, mu_j=-0.15
+    )
+    wide_sim_df = pd.DataFrame(
+        path_values, index=wide_sim_df.index, columns=wide_sim_df.columns
+    )
+
+    # Now run Kelly on the "jumpy" paths
     results = comparison_df.apply(
         lambda row: calculate_full_kelly_path_aware(row, wide_sim_df), axis=1
     )

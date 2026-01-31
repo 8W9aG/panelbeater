@@ -78,21 +78,26 @@ def calculate_full_kelly_path_aware(row, sim_df):
 
             path_outcomes.append((terminal_payoff - entry_price) / entry_price)
 
-    # 4. Variance-Aware Kelly Calculation
+    # 4. ACTUAL Log-Wealth Kelly Calculation
     path_returns = np.array(path_outcomes)
+
+    # We need to find the fraction 'f' that maximizes: E[log(1 + f * r)]
+    # We'll search between 0 and 2.0 (200% leverage) for a more realistic range
+    def expected_log_return(f, returns):
+        # We add a small epsilon to avoid log(0) and handle the 'ruin' case
+        # If any path results in -100% return, f cannot be 1.0
+        return np.mean(np.log(np.maximum(1e-9, 1 + f * returns)))
+
+    # Simple optimization search
+    f_space = np.linspace(0, 2.0, 201)  # Search 0% to 200% allocation
+    log_returns = [expected_log_return(f, path_returns) for f in f_space]
+    f_star = f_space[np.argmax(log_returns)]
+
+    # Calculate mean_r for reporting
     mean_r = np.mean(path_returns)
-    var_r = np.var(path_returns)
 
-    # Pure Kelly: f* = E[r] / Var(r)
-    if var_r > 0 and mean_r > 0:
-        f_star = mean_r / var_r
-    else:
-        f_star = 0.0
+    # 5. NEW SAFETY: The "Drawdown" check
+    # If the worst-case path in your simulation is a total loss (-1.0),
+    # f_star will naturally stay below 1.0 to avoid log(-inf).
 
-    # SAFETY CAP: Never leverage more than X (e.g., 5.0) on a single option
-    # regardless of how good the math looks.
-    f_star = min(f_star, 5.0)
-
-    # CHANGED: Return mean_r directly (e.g., 0.36 for 36%)
-    # instead of mean_r * entry_price
     return f_star, mean_r

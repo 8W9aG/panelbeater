@@ -10,10 +10,38 @@ from scipy.stats import norm
 from .simulate import SIMULATION_COLUMN
 
 
+def apply_merton_jumps(
+    path_matrix, dt=None, days_per_year=365, lam=1.0, mu_j=-0.05, sigma_j=0.1
+):
+    """
+    Args:
+        days_per_year: Set to 365 for Crypto/24-7 markets, 252 for Equities.
+    """
+    if dt is None:
+        dt = 1 / days_per_year
+
+    n_times, n_paths = path_matrix.shape
+
+    # Generate arrivals
+    n_jumps = np.random.poisson(lam * dt, size=(n_times, n_paths))
+
+    # Generate magnitudes
+    jump_magnitudes = n_jumps * np.random.normal(mu_j, sigma_j, size=(n_times, n_paths))
+
+    # Multiplicative application
+    jump_factor = np.exp(np.cumsum(jump_magnitudes, axis=0))
+
+    return path_matrix * jump_factor
+
+
 def prepare_path_matrix(sim_df, ticker_symbol):
     """Pivots Long-format simulation into Wide-format paths."""
     if not isinstance(sim_df, pd.DataFrame):
         raise ValueError(f"Expected DataFrame, got {type(sim_df)}")
+
+    # If the columns are integers (0, 1, 2...) it's already in wide format
+    if all(isinstance(col, int) for col in sim_df.columns[:10]):
+        return sim_df
 
     if SIMULATION_COLUMN not in sim_df.columns:
         raise KeyError(
