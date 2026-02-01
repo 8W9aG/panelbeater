@@ -48,7 +48,6 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
         )
 
     # Find the current options prices
-    # Find the current options prices
     all_trades = []
     for ticker in tickers:
         print(f"Finding pricing options for {ticker}")
@@ -72,6 +71,8 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
             ticker,
             ticker_sim_data,  # pyright: ignore
         )
+        if spot_trades is None:
+            continue
         all_trades.append(spot_trades)
     return pd.concat(all_trades, axis=0, ignore_index=True)
 

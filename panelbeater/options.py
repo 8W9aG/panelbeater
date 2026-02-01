@@ -204,10 +204,15 @@ def save_kelly_charts(df, ticker):
 
 def determine_spot_position_and_save(
     ticker_symbol: str, sim_df: pd.DataFrame
-) -> pd.DataFrame:
+) -> pd.DataFrame | None:
     """Determine spot position."""
     ticker = yf.Ticker(ticker_symbol)
-    spot_price = ticker.history(period="1d")["Close"].iloc[-1]
+    hist = ticker.history(period="1d")
+    if hist.empty:
+        print(f"Skipping {ticker.ticker}: No price data found.")
+        return None  # Or handle strictly as needed
+
+    spot_price = hist["Close"].iloc[-1]
 
     # 1. Transform Long -> Wide
     # This turns your stacked simulations into a 2D Path Matrix
