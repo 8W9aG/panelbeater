@@ -203,3 +203,17 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call"):
         raise ValueError("option_type must be 'call' or 'put'")
 
     return price
+
+
+def calculate_model_volatility(sim_df, days_per_year=365):
+    """Calculates annualized volatility from wide-format simulation paths."""
+    # 1. Calculate daily log returns for all paths
+    # axis=0 calculates along the time steps
+    log_returns = np.log(sim_df / sim_df.shift(1)).dropna()
+
+    # 2. Get the standard deviation of returns across all steps and paths
+    # We take the mean std across all simulation columns
+    avg_daily_std = log_returns.std().mean()
+
+    # 3. Annualize
+    return avg_daily_std * np.sqrt(days_per_year)

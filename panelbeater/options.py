@@ -13,6 +13,32 @@ from .sizing import (apply_merton_jumps, calculate_distribution_exits,
                      calculate_path_aware_mean_variance, prepare_path_matrix)
 
 
+def calculate_model_volatility(wide_df: pd.DataFrame, days_per_year=365) -> float:
+    """Calculates annualized volatility from path matrix."""
+    # Standard deviation of log returns across all paths
+    log_rets = np.log(wide_df / wide_df.shift(1)).dropna()
+    daily_vol = log_rets.std().mean()  # Average std across all simulation columns
+    return daily_vol * np.sqrt(days_per_year)
+
+
+def apply_volatility_sanity_filter(row, model_vol, benchmark_vol_placeholder=0.18):
+    """
+    Returns (True/False, Reason)
+    """
+    market_iv = row["impliedVolatility"]
+
+    # Check 1: Model vs Market IV (1.5x threshold)
+    if model_vol > (market_iv * 1.5):
+        return False, "Model vol too high vs Market IV"
+
+    # Check 2: QQQ/SPY Ratio (Historically ~1.3, capping at 2.0)
+    # Using a placeholder for SPY vol if you don't have the live sim yet
+    if model_vol / benchmark_vol_placeholder > 2.0:
+        return False, "Model vol ratio vs SPY is unrealistic"
+
+    return True, "Rational"
+
+
 def find_mispriced_options_comprehensive(
     ticker_symbol: str, sim_df: pd.DataFrame
 ) -> pd.DataFrame | None:
@@ -125,6 +151,28 @@ def find_mispriced_options_comprehensive(
     # Calculate Kelly
     wide_sim_df = prepare_path_matrix(sim_df, ticker_symbol)
 
+    # --- VOLATILITY SANITY FILTER START ---
+    # 1. Calculate the volatility of your model (realized vol of the paths)
+    # This requires a new helper function (see below)
+    model_vol = calculate_model_volatility(wide_sim_df, days_per_year=365)
+
+    # 2. Get the SPY volatility for the ratio check
+    # Note: You'll need to pass SPY sim_df or calculate it similarly
+    # For now, let's assume you've fetched SPY and have 'model_vol_spy'
+    # benchmark_vol = calculate_model_volatility(wide_sim_df_spy)
+
+    # 3. Apply the filter to remove "fishy" rows before Kelly processing
+    comparison_df["is_rational"] = comparison_df.apply(
+        lambda row: apply_volatility_sanity_filter(
+            row, model_vol, benchmark_vol_placeholder=0.18
+        )[0],
+        axis=1,
+    )
+
+    # The Pythonic and Pandas-optimized way to filter by a boolean column
+    comparison_df = comparison_df[comparison_df["is_rational"]].copy()
+    # --- VOLATILITY SANITY FILTER END ---
+
     # Apply the Black Swan "Truth Serum"
     # lam=1.0 means we expect 1 significant jump per year on average
     path_values = apply_merton_jumps(
@@ -165,7 +213,7 @@ def find_mispriced_options_comprehensive(
     )
 
     print(f"📊 Analysis complete. Saved {len(export_df)} strikes to {filename}")
-    return export_df
+    return export_df  # pyright: ignore
 
 
 def save_kelly_charts(df, ticker):
