@@ -18,7 +18,14 @@ def find_mispriced_options_comprehensive(
 ) -> pd.DataFrame | None:
     """Comprehensively find mispriced options in ITM and OTM."""
     ticker = yf.Ticker(ticker_symbol)
-    spot = ticker.history(period="1d")["Close"].iloc[-1]
+    history = ticker.history(period="1d")
+
+    # Check if history is empty before proceeding
+    if history.empty:
+        print(f"Warning: No data found for {ticker.ticker}. Skipping.")
+        return None
+
+    spot = history["Close"].iloc[-1]
 
     sim_dates = pd.to_datetime(sim_df.index).date.tolist()  # pyright: ignore
     available_expiries = [
