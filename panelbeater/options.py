@@ -22,21 +22,19 @@ def calculate_model_volatility(wide_df: pd.DataFrame, days_per_year=365) -> floa
 
 
 def apply_volatility_sanity_filter(row, model_vol, benchmark_vol_placeholder=0.18):
-    """
-    Returns (True/False, Reason)
-    """
+    """Applies a volatility sanity filter."""
     market_iv = row["impliedVolatility"]
 
-    # Check 1: Model vs Market IV (1.5x threshold)
+    # Check 1: Vol vs Market IV
     if model_vol > (market_iv * 1.5):
-        return False, "Model vol too high vs Market IV"
+        return False, f"VOL_TOO_HIGH: {model_vol:.2%} vs IV {market_iv:.2%}"
 
-    # Check 2: QQQ/SPY Ratio (Historically ~1.3, capping at 2.0)
-    # Using a placeholder for SPY vol if you don't have the live sim yet
-    if model_vol / benchmark_vol_placeholder > 2.0:
-        return False, "Model vol ratio vs SPY is unrealistic"
+    # Check 2: QQQ/SPY Ratio
+    ratio = model_vol / benchmark_vol_placeholder
+    if ratio > 2.0:
+        return False, f"RATIO_TOO_HIGH: {ratio:.2f}x benchmark"
 
-    return True, "Rational"
+    return True, "PASS"
 
 
 def find_mispriced_options_comprehensive(
@@ -160,6 +158,27 @@ def find_mispriced_options_comprehensive(
     # Note: You'll need to pass SPY sim_df or calculate it similarly
     # For now, let's assume you've fetched SPY and have 'model_vol_spy'
     # benchmark_vol = calculate_model_volatility(wide_sim_df_spy)
+
+    # NEW: Diagnostic columns
+    reasons = []
+    is_rational_list = []
+
+    for _, row in comparison_df.iterrows():
+        rational, reason = apply_volatility_sanity_filter(
+            row, model_vol, benchmark_vol_placeholder=0.18
+        )
+        is_rational_list.append(rational)
+        reasons.append(reason)
+
+    # Attach diagnostics to the dataframe
+    comparison_df["is_rational"] = is_rational_list
+    comparison_df["filter_reason"] = reasons
+    comparison_df["model_vol_annualized"] = model_vol
+
+    # Debugging print to terminal
+    if not comparison_df["is_rational"].any():  # pyright: ignore
+        print("🚨 WARNING: All trades filtered out!")
+        print(comparison_df["filter_reason"].value_counts())
 
     # 3. Apply the filter to remove "fishy" rows before Kelly processing
     comparison_df["is_rational"] = comparison_df.apply(

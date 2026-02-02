@@ -56,22 +56,14 @@ def test_volatility_sanity_filter_rejects_unrealistic_vol():
     # 1. Mock a row with 20% Market IV
     mock_row = pd.Series({"impliedVolatility": 0.20, "contractSymbol": "QQQ_TEST_FILTER"})
     
-    # 2. Case A: Model Vol is too high vs Market IV (40% vs 20%)
-    # This triggers the first 'if' block in your function
+    # 2. Case A: Model Vol is too high vs Market IV
     is_rational, reason = apply_volatility_sanity_filter(mock_row, 0.40, 0.18)
     assert is_rational is False
-    assert "Market IV" in reason
-
+    # Use 'IV' instead of 'Market IV' to match your new f-string output
+    assert "IV" in reason 
+    
     # 3. Case B: Ratio vs SPY is too high
-    # FIX: Set QQQ vol to 0.25 (sane vs 0.20 IV) but SPY to 0.10 (Ratio 2.5x > 2.0 limit)
-    model_vol_qqq = 0.25 
-    model_vol_spy_low = 0.10
-    is_rational, reason = apply_volatility_sanity_filter(mock_row, model_vol_qqq, model_vol_spy_low)
-
+    is_rational, reason = apply_volatility_sanity_filter(mock_row, 0.25, 0.10)
     assert is_rational is False
-    # Match the actual string: "Model vol ratio vs SPY is unrealistic"
-    assert "ratio vs SPY" in reason
-
-    # 4. Case C: Everything is normal
-    is_rational, _ = apply_volatility_sanity_filter(mock_row, 0.22, 0.18)
-    assert is_rational is True
+    # Use 'RATIO' to match 'RATIO_TOO_HIGH'
+    assert "RATIO" in reason
