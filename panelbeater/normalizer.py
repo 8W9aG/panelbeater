@@ -63,7 +63,11 @@ def denormalize(
     asset_idx = 0
     for col in target_cols:
         # 1. Gather all predicted probabilities for this asset's buckets
-        z_cols = {x for x in cols if x.startswith(col) and x != col}
+        z_cols = {
+            x
+            for x in cols
+            if x.startswith(col) and x != col and x.split("_")[1] == col.split("_")[1]
+        }
         if not z_cols:
             continue
         historical_series = y[col].pct_change().dropna()
