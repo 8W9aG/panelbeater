@@ -69,13 +69,19 @@ def denormalize(
         historical_series = y[col].pct_change().dropna()
 
         # Sort buckets (stds) and their associated probabilities
-        stds = sorted(
-            [
-                float(x.replace(col, "").split("_")[1])
-                for x in z_cols
-                if _is_float(x.replace(col, "").split("_")[1])
-            ]
-        )
+        stds = []
+        try:
+            stds = sorted(
+                [
+                    float(x.replace(col, "").split("_")[1])
+                    for x in z_cols
+                    if _is_float(x.replace(col, "").split("_")[1])
+                ]
+            )
+        except IndexError as exc:
+            print(f"col = {col}")
+            raise exc
+
         probs = []
         for std in stds:
             std_suffix = f"{col}_{std}_{PROBABILITY_COLUMN_PREFIX}"
