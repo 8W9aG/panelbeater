@@ -1,6 +1,6 @@
 """Normalize the Y targets to standard deviations."""
 
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,line-too-long,too-many-statements
 import math
 
 import numpy as np
@@ -83,7 +83,7 @@ def denormalize(
                 ]
             )
         except IndexError as exc:
-            print(f"col = {col}")
+            print(f"Failed to get stds of ticker: {col}")
             raise exc
 
         probs = []
@@ -107,8 +107,14 @@ def denormalize(
             highest_std = np.random.choice(stds, p=probs)
 
         # 3. Use Pandas rolling on the historical y dataframe to avoid ndarray errors
-        mu = float(historical_series.rolling(365).mean().fillna(0.0).iloc[-1])  # pyright: ignore
-        sigma = float(historical_series.rolling(365).std().fillna(0.0).iloc[-1])
+        mu = 0.0
+        sigma = 0.0
+        try:
+            mu = float(historical_series.rolling(365).mean().fillna(0.0).iloc[-1])  # pyright: ignore
+            sigma = float(historical_series.rolling(365).std().fillna(0.0).iloc[-1])
+        except IndexError as exc:
+            print(f"Failed to get mu/sigma of ticker: {col} - {historical_series}")
+            raise exc
 
         lower_bound = highest_std - 0.25
         upper_bound = highest_std + 0.25
