@@ -44,13 +44,11 @@ def find_mispriced_options_comprehensive(
     ticker = yf.Ticker(ticker_symbol)
     history = ticker.history(period="1d")
 
-    # Check if history is empty before proceeding
     if history.empty:
         print(f"Warning: No data found for {ticker.ticker}. Skipping.")
         return None
 
     spot = history["Close"].iloc[-1]
-
     sim_dates = pd.to_datetime(sim_df.index).date.tolist()  # pyright: ignore
     available_expiries = [
         datetime.strptime(d, "%Y-%m-%d").date() for d in ticker.options
@@ -59,45 +57,49 @@ def find_mispriced_options_comprehensive(
 
     all_results = []
 
+    # Counters for liquidity filtering logging
+    total_chains_seen = 0
+    dropped_liquidity = 0
+
     for target_date in common_dates:
         date_str = target_date.strftime("%Y-%m-%d")
         chain = ticker.option_chain(date_str)
 
-        # Pulling the full chain for both calls and puts
         calls = chain.calls.copy()
         puts = chain.puts.copy()
-
         calls["type"] = "call"
         puts["type"] = "put"
-        # 1. INJECT THE EXPIRY HERE
-        # This ensures the row has the key your function is looking for
         calls["expiry"] = date_str
         puts["expiry"] = date_str
 
         full_chain = pd.concat([calls, puts])
 
+        # Track initial count
+        initial_len = len(full_chain)
+        total_chains_seen += initial_len
+
         # --- LIQUIDITY FILTER START ---
         # 1. Basic Volume/Interest Check
+        # We keep this as a hard filter because if there is no volume, we literally can't trade it.
+        # But we will log it.
         full_chain = full_chain[
             (full_chain["openInterest"] > 50)
             & (full_chain["volume"] >= 5)
             & (full_chain["ask"] > 0.05)
         ].copy()
 
-        # 2. Calculate Relative Spread (The "Fishy" Detector)
-        # (Ask - Bid) / Ask gives us the % cost to cross the spread immediately
+        # 2. Calculate Relative Spread
         full_chain["rel_spread"] = (full_chain["ask"] - full_chain["bid"]) / full_chain[
             "ask"
         ]
 
-        # 3. Filter for Liquidity
-        # Threshold: 0.10 (10%). If it costs >10% just to enter, Kelly will be distorted.
+        # 3. Filter for Liquidity (Hard Filter)
         full_chain = full_chain[full_chain["rel_spread"] <= 0.10].copy()
 
         # 4. Realistic Entry Price
-        # Instead of using the raw 'Ask', we use a mid-point or a slightly penalized Ask
-        # to ensure the Kelly math isn't too optimistic.
         full_chain["effective_entry"] = full_chain["ask"]
+
+        dropped_liquidity += initial_len - len(full_chain)
         # --- LIQUIDITY FILTER END ---
 
         model_prices_at_t = sim_df.loc[date_str].values
@@ -106,12 +108,10 @@ def find_mispriced_options_comprehensive(
             k = row["strike"]
             ask = row["ask"]
             bid = row["bid"]
-            symbol = row[
-                "contractSymbol"
-            ]  # This is the unique ticker (e.g., TSLA260116C00200000)
+            symbol = row["contractSymbol"]
 
             if ask <= 0.05:
-                continue  # Filter for basic liquidity
+                continue
 
             # Determine Probability & ITM Status
             if row["type"] == "call":
@@ -121,7 +121,6 @@ def find_mispriced_options_comprehensive(
                 model_prob = np.mean(model_prices_at_t < k)
                 is_itm = spot < k
 
-            # Premium-based Exit Logic (Adjust multipliers as needed)
             tp_target, sl_target = calculate_distribution_exits(row, sim_df)
 
             all_results.append(
@@ -141,59 +140,40 @@ def find_mispriced_options_comprehensive(
                 }
             )
 
+    # Log the liquidity drops
+    print(
+        f"📉 Liquidity Filter: Dropped {dropped_liquidity}/{total_chains_seen} contracts (Low Vol/OI/High Spread)."
+    )
+
     if not all_results:
+        print("❌ No contracts survived the basic liquidity filter.")
         return None
 
     comparison_df = pd.DataFrame(all_results)
 
-    # Calculate Kelly
-    wide_sim_df = prepare_path_matrix(sim_df, ticker_symbol)
-
     # --- VOLATILITY SANITY FILTER START ---
-    # 1. Calculate the volatility of your model (realized vol of the paths)
-    # This requires a new helper function (see below)
+    wide_sim_df = prepare_path_matrix(sim_df, ticker_symbol)
     model_vol = calculate_model_volatility(wide_sim_df, days_per_year=365)
 
-    # 2. Get the SPY volatility for the ratio check
-    # Note: You'll need to pass SPY sim_df or calculate it similarly
-    # For now, let's assume you've fetched SPY and have 'model_vol_spy'
-    # benchmark_vol = calculate_model_volatility(wide_sim_df_spy)
-
-    # NEW: Diagnostic columns
-    reasons = []
-    is_rational_list = []
-
-    for _, row in comparison_df.iterrows():
-        rational, reason = apply_volatility_sanity_filter(
+    # Apply logic but DO NOT DROP ROWS yet
+    # We apply the filter and store the reason
+    def _apply_filter_wrapper(row):
+        return apply_volatility_sanity_filter(
             row, model_vol, benchmark_vol_placeholder=0.18
         )
-        is_rational_list.append(rational)
-        reasons.append(reason)
 
-    # Attach diagnostics to the dataframe
-    comparison_df["is_rational"] = is_rational_list
-    comparison_df["filter_reason"] = reasons
+    # Apply returns a tuple (bool, reason), so we unzip it
+    filter_results = comparison_df.apply(_apply_filter_wrapper, axis=1)
+    comparison_df["is_rational"] = [res[0] for res in filter_results]
+    comparison_df["filter_reason"] = [res[1] for res in filter_results]
     comparison_df["model_vol_annualized"] = model_vol
 
-    # Debugging print to terminal
-    if not comparison_df["is_rational"].any():  # pyright: ignore
-        print("🚨 WARNING: All trades filtered out!")
-        print(comparison_df["filter_reason"].value_counts())
-
-    # 3. Apply the filter to remove "fishy" rows before Kelly processing
-    comparison_df["is_rational"] = comparison_df.apply(
-        lambda row: apply_volatility_sanity_filter(
-            row, model_vol, benchmark_vol_placeholder=0.18
-        )[0],
-        axis=1,
-    )
-
-    # The Pythonic and Pandas-optimized way to filter by a boolean column
-    comparison_df = comparison_df[comparison_df["is_rational"]].copy()
+    # LOGGING: Detailed breakdown of reasons
+    print("\n🔍 Filter Reason Breakdown:")
+    print(comparison_df["filter_reason"].value_counts().to_string())
     # --- VOLATILITY SANITY FILTER END ---
 
     # Apply the Black Swan "Truth Serum"
-    # lam=1.0 means we expect 1 significant jump per year on average
     path_values = apply_merton_jumps(
         wide_sim_df.values, days_per_year=365, lam=1.0, mu_j=-0.15
     )
@@ -201,38 +181,45 @@ def find_mispriced_options_comprehensive(
         path_values, index=wide_sim_df.index, columns=wide_sim_df.columns
     )
 
-    # Now run Kelly on the "jumpy" paths
-    results = comparison_df.apply(
-        lambda row: calculate_full_kelly_path_aware(row, wide_sim_df), axis=1
-    )
+    # --- CONDITIONAL KELLY CALCULATION ---
+    # We now calculate Kelly ONLY if the trade is rational.
+    # If not rational, we force 0.0. This ensures the row exists in the dataframe
+    # so the sync script can see "Kelly: 0.0" and close the position.
+
+    def _safe_kelly(row):
+        if not row["is_rational"]:
+            return 0.0, 0.0  # Force zero conviction for filtered trades
+        return calculate_full_kelly_path_aware(row, wide_sim_df)
+
+    results = comparison_df.apply(_safe_kelly, axis=1)
+
     comparison_df[["kelly_fraction", "expected_profit"]] = pd.DataFrame(
         results.tolist(), index=comparison_df.index
     )
 
-    # Visualization and Saving
+    # Visualization and Saving (Only graph the positive ones to avoid clutter)
     save_kelly_charts(comparison_df, ticker_symbol)
 
-    # 1. Add Metadata for History Tracking
-    # This allows you to compare different versions of your 'Panelbeater' world model later
     comparison_df["run_timestamp"] = datetime.now()
     comparison_df["ticker"] = ticker_symbol
 
-    # 2. Cleanup Data for Storage
-    # We ensure decimals are kept as floats for mathematical precision in future reads
     export_df = comparison_df.copy()
-
-    # 3. Export to Parquet
-    # We use 'pyarrow' as the engine for better handling of complex types
     filename = f"panelbeater_signals_{ticker_symbol}.parquet"
+
+    # Save EVERYTHING, including the 0.0 conviction trades
     export_df.to_parquet(
         filename,
         engine="pyarrow",
-        compression="snappy",  # High performance compression
+        compression="snappy",
         index=False,
     )
 
-    print(f"📊 Analysis complete. Saved {len(export_df)} strikes to {filename}")
-    return export_df  # pyright: ignore
+    valid_trades = len(export_df[export_df["kelly_fraction"] > 0])
+    print(
+        f"📊 Analysis complete. Saved {len(export_df)} rows ({valid_trades} actionable) to {filename}"
+    )
+
+    return export_df
 
 
 def save_kelly_charts(df, ticker):

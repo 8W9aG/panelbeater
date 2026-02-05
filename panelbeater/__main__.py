@@ -43,6 +43,7 @@ _MACROS = [
     "VIXCLS",  # CBOE Volatility Index: VIX
     "DTWEXBGS",  # Nominal Broad U.S. Dollar Index
     "INDPRO",  # Industrial Production: Total Index
+    "BAMLH0A0HYM2",  # ICE BofA US High Yield Index Option-Adjusted Spread
     # Indexes
     "^IRX",  # 13 WEEK TREASURY BILL
 ]
