@@ -46,10 +46,18 @@ def sync_positions(df: pd.DataFrame):
         if is_option and not is_market_open:  # pyright: ignore
             continue
 
-        symbol = row["option_symbol"] if is_option else row["ticker"]  # pyright: ignore
+        # --- FIX: Clean suffix and identify type ---
+        # 1. Strip common suffixes from data source
+        raw_symbol = row["option_symbol"] if is_option else row["ticker"]  # pyright: ignore
+        symbol = raw_symbol.replace("/SPOT", "").replace("-SPOT", "")  # pyright: ignore
 
+        # 2. Re-evaluate if it's actually crypto
+        # A more reliable check: does it still have crypto-like delimiters after cleaning?
+        # Or you can check against a known list.
         is_crypto = "-" in symbol or "/" in symbol
-        trade_symbol = symbol.replace("-", "/") if is_crypto else symbol  # pyright: ignore
+
+        # Alpaca crypto format is usually BTC/USD
+        trade_symbol = symbol.replace("-", "/") if is_crypto else symbol
 
         # 1. Determine Current State
         pos = positions.get(symbol.replace("/", "").replace("-", ""))  # pyright: ignore

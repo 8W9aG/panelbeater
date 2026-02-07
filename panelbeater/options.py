@@ -78,23 +78,28 @@ def find_mispriced_options_comprehensive(
         initial_len = len(full_chain)
         total_chains_seen += initial_len
 
-        # --- LIQUIDITY FILTER START ---
+        # --- LIQUIDITY FILTER START (SMART v2) ---
         # 1. Basic Volume/Interest Check
-        # We keep this as a hard filter because if there is no volume, we literally can't trade it.
-        # But we will log it.
+        # We allow 0 volume if OI is high (e.g. morning trading)
         full_chain = full_chain[
-            (full_chain["openInterest"] > 50)
-            & (full_chain["volume"] >= 5)
+            (full_chain["openInterest"] > 10)
+            & (full_chain["volume"] >= 0)
             & (full_chain["ask"] > 0.05)
         ].copy()
 
-        # 2. Calculate Relative Spread
-        full_chain["rel_spread"] = (full_chain["ask"] - full_chain["bid"]) / full_chain[
-            "ask"
-        ]
+        # 2. Calculate Spreads
+        full_chain["spread_width"] = full_chain["ask"] - full_chain["bid"]
+        full_chain["rel_spread"] = full_chain["spread_width"] / full_chain["ask"]
 
-        # 3. Filter for Liquidity (Hard Filter)
-        full_chain = full_chain[full_chain["rel_spread"] <= 0.10].copy()
+        # 3. Smart Filter Logic
+        # Rule A: Percentage spread is healthy (<= 20%)
+        # Rule B: Dollar spread is tiny (<= $0.15), regardless of percentage.
+        #         (This saves cheap OTM options like Bid 0.20 / Ask 0.25)
+        liquidity_mask = (full_chain["rel_spread"] <= 0.20) | (
+            full_chain["spread_width"] <= 0.15
+        )
+
+        full_chain = full_chain[liquidity_mask].copy()
 
         # 4. Realistic Entry Price
         full_chain["effective_entry"] = full_chain["ask"]

@@ -118,3 +118,85 @@ def test_denormalize_null_logic():
         f"Scenario B Failed: Price should have jittered, but remained {last_price}"
         
     print(f"Scenario B (Jitter) Passed: Price changed from {last_price} to {new_price_jitter}")
+
+def test_normalize_horizon_logic():
+    """
+    Verifies that 'normalize' correctly respects the 'horizon' argument.
+    
+    Scenario:
+    t=369: Price = 100
+    t=370: Price = 105 (Big jump up)
+    t=371: Price = 100 (Big jump down)
+    
+    At t=371:
+    - Horizon 1 (1-day change): 105 -> 100 (-4.7% drop)
+    - Horizon 2 (2-day change): 100 -> 100 (0.0% change)
+    """
+    
+    # 1. Setup Synthetic Data
+    # We need >365 rows because normalize uses .rolling(365)
+    dates = pd.date_range(start="2020-01-01", periods=400, freq="D")
+    prices = [100.0] * 400
+    
+    # Introduce volatility
+    prices[370] = 105.0 
+    
+    df = pd.DataFrame({"close": prices}, index=dates)
+
+    # 2. Run Normalize with different horizons
+    df_h1 = normalize(df.copy(), horizon=1)
+    df_h2 = normalize(df.copy(), horizon=2)
+    
+    # 3. Analyze Index 371
+    idx_check = 371
+    
+    # --- Check Horizon 2 (Should be 0% change) ---
+    # The 'close_null' column should be True because 100->100 is exactly 0 change
+    assert "close_null" in df_h2.columns
+    is_null_h2 = df_h2.iloc[idx_check]["close_null"]
+    assert is_null_h2 == True, (
+        f"At index {idx_check}, Horizon 2 should see 100->100 (0% change) and trigger the null bucket."
+    )
+
+    # --- Check Horizon 1 (Should be negative change) ---
+    # The 'close_null' column should be False because 105->100 is a drop
+    is_null_h1 = df_h1.iloc[idx_check]["close_null"]
+    assert is_null_h1 == False, (
+        f"At index {idx_check}, Horizon 1 should see 105->100 (drop) and NOT trigger the null bucket."
+    )
+    
+    # Furthermore, verify the active bucket is different
+    # Helper to find which bucket is active (set to 1.0)
+    def get_active_bucket(df_norm, row_idx):
+        row = df_norm.iloc[row_idx]
+        # Return column name where value is True/1.0 (ignoring the null column)
+        active_cols = row[row == True].index.tolist()
+        return [c for c in active_cols if "null" not in c]
+
+    buckets_h1 = get_active_bucket(df_h1, idx_check)
+    buckets_h2 = get_active_bucket(df_h2, idx_check)
+
+    # In H2 (0% change), the active bucket should be 'close_0.0'
+    assert "close_-0.0" in buckets_h2
+    
+    # In H1 (Drop), the active bucket should be negative (e.g., 'close_-3.0' or similar depending on sigma)
+    # Since the history is mostly flat, sigma is low, so a -5 drop is likely a large sigma move (-3.0)
+    print(f"H1 Buckets: {buckets_h1}")
+    assert "close_-0.0" not in buckets_h1
+    assert buckets_h1 != buckets_h2
+
+def test_normalize_structure():
+    """Ensure normalize returns expected shape and columns."""
+    dates = pd.date_range(start="2020-01-01", periods=370, freq="D")
+    df = pd.DataFrame({"close": [100.0] * 370}, index=dates)
+    
+    df_norm = normalize(df, horizon=5)
+    
+    # Should have rows equal to input
+    assert len(df_norm) == len(df)
+    
+    # Should contain generated bucket columns
+    assert any("close_" in col for col in df_norm.columns)
+    
+    # Should contain null column
+    assert "close_null" in df_norm.columns

@@ -171,3 +171,45 @@ def test_option_uses_day_tif(mock_alpaca_client):
     # Check that the first order (entry) used DAY
     entry_order = mock_alpaca_client.submit_order.call_args_list[0].args[0]
     assert entry_order.time_in_force == TimeInForce.DAY
+
+def test_spot_suffix_removal_and_equity_routing(mock_alpaca_client):
+    """
+    Verifies that tickers like 'QQQ/SPOT' have the suffix removed 
+    and are correctly routed to Equity logic (using qty) rather than Crypto.
+    """
+    df = pd.DataFrame({
+        'ticker': ['QQQ/SPOT'],  # The problematic ticker format
+        'kelly_fraction': [1.0],
+        'type': ['spot_long'],
+        'ask': [400.0],
+        'tp_target': [450.0],
+        'sl_target': [350.0]
+    })
+    
+    # Mock account buying power: 100k * 0.95 = $95,000 target
+    # $95,000 / $400 per share = 237.5 shares -> rounded to 238
+    mock_account = MagicMock()
+    mock_account.buying_power = "100000.00"
+    mock_alpaca_client.get_account.return_value = mock_account
+    
+    mock_alpaca_client.get_all_positions.return_value = []
+
+    sync_positions(df)
+
+    # 1. Verify the call happened
+    assert mock_alpaca_client.submit_order.called
+    
+    # 2. Get the first order request (the Market Entry)
+    entry_order_req = mock_alpaca_client.submit_order.call_args_list[0].args[0]
+
+    # ASSERTIONS
+    # Ensure suffix was stripped
+    assert entry_order_req.symbol == 'QQQ'
+    
+    # Ensure it used 'qty' (Equity strategy) instead of 'notional' (Crypto strategy)
+    # If the code incorrectly identifies this as crypto, .qty will likely be None or error
+    assert hasattr(entry_order_req, 'qty')
+    assert entry_order_req.qty == 238.0
+    
+    # Ensure notional is NOT set (standard for Equity MarketOrderRequest)
+    assert getattr(entry_order_req, 'notional', None) is None

@@ -1,6 +1,6 @@
 """Normalize the Y targets to standard deviations."""
 
-# pylint: disable=too-many-locals,line-too-long,too-many-statements
+# pylint: disable=too-many-locals,line-too-long,too-many-statements,too-many-locals
 import math
 
 import numpy as np
@@ -16,31 +16,41 @@ def _is_float(s: str) -> bool:
         return False
 
 
-def normalize(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize the dataframe per column by z-score bucketing."""
+def normalize(df: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
+    """
+    Normalize the dataframe per column by z-score bucketing.
 
-    # 1. Calculate Percent Change (preserve this in a specific variable)
-    df_pct = df.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    Args:
+        df: Input dataframe of prices.
+        horizon: The period over which to calculate the percentage change.
+    """
 
-    # 2. Calculate Statistics based on pct_change
+    # 1. Calculate Percent Change for the specific Horizon
+    # periods=horizon ensures we capture the change from t-h to t
+    df_pct = df.pct_change(periods=horizon, fill_method=None).replace(
+        [np.inf, -np.inf], np.nan
+    )
+
+    # 2. Calculate Statistics based on that specific horizon's returns
+    # We look at the history of H-day returns to establish the baseline
     mu = df_pct.rolling(365).mean()
     sigma = df_pct.rolling(365).std()
 
     # 3. Create the Normalized/Bucketed DataFrame (Z-scores)
-    # We use df_pct here, not the original df
     df_norm = ((((df_pct - mu) / sigma) * 2.0).round() / 2.0).clip(-3, 3)
 
     dfs = []
     for col in df_norm.columns:
-        # A. Create the bucket columns (based on Z-score)
+        # A. Create the bucket columns
+        # Note: Since buckets are dynamic based on unique values found,
+        # this handles different horizons naturally.
         for unique_val in df_norm[col].unique():
             if math.isnan(unique_val):
                 continue
             s = (df_norm[col] == unique_val).rename(f"{col}_{unique_val}")
             dfs.append(s)
 
-        # B. Create the specific 'null' column (based on raw pct_change)
-        # We look at df_pct to see if the change was exactly 0.0
+        # B. Create the specific 'null' column
         s_null = pd.Series(
             np.isclose(df_pct[col], 0.0), index=df_pct.index, name=f"{col}_null"
         )
