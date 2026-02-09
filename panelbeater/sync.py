@@ -36,7 +36,17 @@ def sync_positions(df: pd.DataFrame):
         df["target_usd"] = 0.0
 
     raw_positions = trading_client.get_all_positions()
-    positions = {p.symbol: p for p in raw_positions}  # type: ignore
+
+    # --- FIX 1: Normalize keys for reliable lookup ---
+    # We strip slashes and dashes from the Alpaca symbol so it matches your logic below.
+    # We store both the position object AND the original raw symbol for later use.
+    positions = {
+        p.symbol.replace("/", "").replace("-", ""): p  # type: ignore
+        for p in raw_positions  # type: ignore
+    }
+
+    # Track which symbols we have processed to identify "Zombies" later
+    processed_positions = set()
 
     for _, row in df.iterrows():
         # --- SYMBOL IDENTIFICATION ---
@@ -47,20 +57,21 @@ def sync_positions(df: pd.DataFrame):
             continue
 
         # --- FIX: Clean suffix and identify type ---
-        # 1. Strip common suffixes from data source
         raw_symbol = row["option_symbol"] if is_option else row["ticker"]  # pyright: ignore
         symbol = raw_symbol.replace("/SPOT", "").replace("-SPOT", "")  # pyright: ignore
 
-        # 2. Re-evaluate if it's actually crypto
-        # A more reliable check: does it still have crypto-like delimiters after cleaning?
-        # Or you can check against a known list.
-        is_crypto = "-" in symbol or "/" in symbol
+        # Create the lookup key (stripped)
+        lookup_key = symbol.replace("/", "").replace("-", "")
 
-        # Alpaca crypto format is usually BTC/USD
+        # Mark this symbol as processed so we don't liquidate it later
+        processed_positions.add(lookup_key)
+
+        is_crypto = "-" in symbol or "/" in symbol
         trade_symbol = symbol.replace("-", "/") if is_crypto else symbol
 
         # 1. Determine Current State
-        pos = positions.get(symbol.replace("/", "").replace("-", ""))  # pyright: ignore
+        # Now this lookup works because both keys are stripped
+        pos = positions.get(lookup_key)
 
         # Use Ask price for calculations to be conservative on buying power
         price = float(pos.current_price) if pos else float(row["ask"])  # type: ignore
@@ -76,25 +87,19 @@ def sync_positions(df: pd.DataFrame):
             else:
                 target_qty = -target_qty
 
-        # 3. Decision Logic (Calculate DELTA)
+        # 3. Decision Logic
         current_usd_value = current_qty * price * multiplier
 
-        # Determine the Dollar Difference (used for Min Trade Check)
         if row["type"] == "spot_short" and is_crypto:
             target_usd = 0.0
         else:
             target_usd = row["target_usd"]
 
         diff_usd = target_usd - current_usd_value
-
-        # --- FIX START: Calculate Quantity Delta ---
-        # We need to trade the DIFFERENCE, not the total target
         delta_qty = target_qty - current_qty
-
-        # Rounding: Options must be whole numbers. Equities in this script seem to be treated as whole too.
-        # If you are selling (negative delta), abs() handles the magnitude.
-        qty_to_trade = abs(round(delta_qty, 0))  # pyright: ignore
-        # --- FIX END ---
+        qty_to_trade = (
+            abs(round(delta_qty, 0)) if is_option or not is_crypto else abs(delta_qty)  # pyright: ignore
+        )  # Ensure float for crypto, int for others if needed
 
         # Check thresholds
         if abs(diff_usd) < MIN_TRADE_USD:
@@ -115,9 +120,7 @@ def sync_positions(df: pd.DataFrame):
         if is_crypto:
             execute_crypto_strategy(
                 symbol=trade_symbol,
-                trade_notional=abs(
-                    diff_usd
-                ),  # Crypto uses Notional (USD), so diff_usd is correct here
+                trade_notional=abs(diff_usd),
                 total_target_usd=row["target_usd"],
                 side=side,
                 tp=row["tp_target"],
@@ -125,7 +128,6 @@ def sync_positions(df: pd.DataFrame):
                 trading_client=trading_client,
             )
         elif is_option:  # pyright: ignore
-            # Pass qty_to_trade (the delta) instead of target_qty
             execute_option_strategy(
                 trade_symbol,
                 qty_to_trade,
@@ -135,7 +137,6 @@ def sync_positions(df: pd.DataFrame):
                 trading_client,
             )
         else:
-            # Pass qty_to_trade (the delta) instead of target_qty
             execute_equity_strategy(
                 trade_symbol,
                 qty_to_trade,
@@ -144,6 +145,21 @@ def sync_positions(df: pd.DataFrame):
                 row["sl_target"],
                 trading_client,
             )
+
+    # --- FIX 2: LIQUIDATE LEFTOVERS (Zombies) ---
+    for lookup_key, pos in positions.items():
+        if lookup_key not in processed_positions:
+            print(f"[{pos.symbol}] Not in target portfolio. Liquidating...")  # type: ignore
+            try:
+                # 1. Cancel open orders for this specific symbol
+                # We reuse your existing helper function here for safety/consistency
+                clear_orders(pos.symbol, trading_client)  # type: ignore
+
+                # 2. Close the position (Market Order)
+                trading_client.close_position(pos.symbol)  # type: ignore
+                print(f"[{pos.symbol}] Liquidation order sent.")  # type: ignore
+            except Exception as e:
+                print(f"[{pos.symbol}] Failed to liquidate: {e}")  # type: ignore
 
 
 def clear_orders(symbol, trading_client):
@@ -158,14 +174,7 @@ def clear_orders(symbol, trading_client):
 def execute_crypto_strategy(
     symbol, trade_notional, total_target_usd, side, tp, sl, trading_client
 ):
-    """
-    Crypto Strategy:
-    1. Executes a Market order by USD Amount (Notional).
-    2. Checks if position exists (handles full liquidation).
-    3. Sets TP/SL based on the exact quantity we now own.
-    """
-    # 1. Execute the Immediate Trade (Entry or Exit)
-    # We use 'notional' (USD) so we don't worry about decimal precision on the trade
+    """Crypto Strategy: Market order by USD Amount."""
     print(f"[{symbol}] Executing Market Order for ${trade_notional}...")
     try:
         trading_client.submit_order(
@@ -180,29 +189,20 @@ def execute_crypto_strategy(
         print(f"[{symbol}] Execution Failed: {e}")
         return
 
-    # 2. Wait for fill & update
     time.sleep(2.0)
 
-    # 3. Check for Position Existence
-    # If we sold everything, this returns 404/Error, and we stop.
     try:
         new_pos = trading_client.get_open_position(symbol)
     except APIError:
         print(f"[{symbol}] Position liquidated (or not found). No exits set.")
         return
 
-    # 4. Set Safety Orders (TP / SL) on the *Total* new quantity
-    # Crypto quantities can be very precise (e.g. 0.002341), so we read it directly from 'new_pos'
     abs_qty = abs(float(new_pos.qty))
-
-    # In Crypto, we only hold Long positions usually.
-    # If you are Shorting crypto, logic ensures side is BUY to cover.
     exit_side = OrderSide.SELL
 
     print(f"[{symbol}] Setting Exits for {abs_qty} units...")
 
     try:
-        # Take Profit (Limit Sell)
         if tp > 0:
             trading_client.submit_order(
                 LimitOrderRequest(
@@ -214,7 +214,6 @@ def execute_crypto_strategy(
                 )
             )
 
-        # Stop Loss (Stop Sell)
         if sl > 0:
             trading_client.submit_order(
                 StopOrderRequest(
@@ -230,42 +229,29 @@ def execute_crypto_strategy(
 
 
 def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
-    """
-    Equity Strategy (Standardized):
-    1. Market Order for the delta (Change in shares).
-    2. Re-reads total position.
-    3. Sets fresh TP/SL for the entire holding.
-    """
+    """Equity Strategy: Market Order for delta + Exit Reset."""
     action = "BUYING" if side == OrderSide.BUY else "SELLING"
     print(f"[{symbol}] {action} {qty} shares...")
 
     try:
-        # 1. Execute the Trade
         trading_client.submit_order(
             MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                time_in_force=TimeInForce.DAY,  # Or GTC
+                time_in_force=TimeInForce.DAY,
             )
         )
 
-        # 2. Wait for fill
         time.sleep(2.0)
 
-        # 3. Check Position
         try:
             new_pos = trading_client.get_open_position(symbol)
         except APIError:
             print(f"[{symbol}] Position closed. No exits needed.")
             return
 
-        # 4. Set Stops on Total Position
-        # We read the total quantity we now own (e.g. 150 shares)
-        # and protect the *entire* stack, not just the new batch.
         total_qty = abs(float(new_pos.qty))
-
-        # If we are Long, we Sell to exit.
         exit_side = OrderSide.SELL if float(new_pos.qty) > 0 else OrderSide.BUY
 
         print(f"[{symbol}] Resetting Exits for total {total_qty} shares...")
@@ -297,8 +283,7 @@ def execute_equity_strategy(symbol, qty, side, tp, sl, trading_client):
 
 
 def update_exits(symbol, model_tp, model_sl, trading_client):
-    """Replaces open exit orders with refined logic for options and threshold sensitivity."""
-    # Determine sensitivity: 0.01 for options/low-price, 0.5 for others
+    """Replaces open exit orders."""
     is_option = len(symbol) > 12
     threshold = 0.01 if is_option else 0.25
 
@@ -308,7 +293,6 @@ def update_exits(symbol, model_tp, model_sl, trading_client):
 
     for order in open_orders:
         try:
-            # 1. Update Take Profit (Limit Orders)
             if order.type == OrderType.LIMIT and model_tp > 0:
                 if abs(float(order.limit_price) - model_tp) > threshold:
                     print(f"[{symbol}] Updating TP to {model_tp}")
@@ -316,32 +300,27 @@ def update_exits(symbol, model_tp, model_sl, trading_client):
                         order.id, ReplaceOrderRequest(limit_price=round(model_tp, 2))
                     )
 
-            # 2. Update Stop Loss (Stop or Stop-Limit Orders)
             elif order.type in [OrderType.STOP, OrderType.STOP_LIMIT] and model_sl > 0:
-                # ReplaceOrderRequest uses 'stop_price' for both Stop and Stop-Limit types
                 if abs(float(order.stop_price) - model_sl) > threshold:
                     print(f"[{symbol}] Updating SL to {model_sl}")
                     trading_client.replace_order_by_id(
                         order.id, ReplaceOrderRequest(stop_price=round(model_sl, 2))
                     )
 
-            # 3. Handle 'Canceled' Signal
             elif model_tp == 0 or model_sl == 0:
                 print(f"[{symbol}] Model target is 0. Canceling order {order.id}")
                 trading_client.cancel_order_by_id(order.id)
 
         except Exception as e:
-            # Common error: order is already 'pending_replace' or 'filled'
             print(f"Update failed for {symbol} ({order.type}): {e}")
 
 
 def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
-    """Executes orders for Options, handling both Entries and Exits."""
+    """Executes orders for Options."""
     action = "BUYING" if side == OrderSide.BUY else "SELLING"
     print(f"[{symbol}] {action} {qty} contracts (Market)...")
 
     try:
-        # Step 1: Execute the Trade (Entry or Exit)
         trading_client.submit_order(
             MarketOrderRequest(
                 symbol=symbol,
@@ -351,26 +330,19 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
             )
         )
 
-        # Step 2: Wait for Fill
         time.sleep(2.0)
 
-        # Step 3: Check if we still hold the position
         try:
             new_pos = trading_client.get_open_position(symbol)
         except APIError:
-            # This happens if we sold everything (Position Not Found)
             print(f"[{symbol}] Position closed successfully. No new exits needed.")
             return
 
-        # Step 4: If we still have shares (Partial Exit or Entry), reset TP/SL
         abs_qty = abs(float(new_pos.qty))
-
-        # Determine exit side (If we are Long, exit is Sell)
         pos_side = OrderSide.SELL if float(new_pos.qty) > 0 else OrderSide.BUY
 
         print(f"[{symbol}] Resetting TP/SL for remaining {abs_qty} contracts...")
 
-        # Take Profit
         if tp > 0:
             trading_client.submit_order(
                 LimitOrderRequest(
@@ -382,7 +354,6 @@ def execute_option_strategy(symbol, qty, side, tp, sl, trading_client):
                 )
             )
 
-        # Stop Loss
         if sl > 0:
             trading_client.submit_order(
                 StopOrderRequest(

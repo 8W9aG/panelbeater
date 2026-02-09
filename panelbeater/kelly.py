@@ -95,9 +95,29 @@ def calculate_full_kelly_path_aware(row, sim_df):
 
     # Calculate mean_r for reporting
     mean_r = np.mean(path_returns)
+    win_rate = np.mean(path_returns > 0)
+    worst_case = np.min(path_returns)
 
     # 5. NEW SAFETY: The "Drawdown" check
     # If the worst-case path in your simulation is a total loss (-1.0),
     # f_star will naturally stay below 1.0 to avoid log(-inf).
+    # Only log if we are hitting the ceiling (1.99 or 2.0)
+    if f_star >= 1.99:
+        print(
+            f"[{row.get('symbol', 'OPT')}] MAX KELLY HIT (2.0) | "
+            f"WinRate: {win_rate:.2%} | "
+            f"Mean Return: {mean_r:.2%} | "
+            f"Worst Path: {worst_case:.2%} | "
+            f"Entry: {entry_price:.2f}"
+        )
+
+        # DEBUG TIP: If the worst case is NOT -1.0 (-100%), Kelly can be > 1.
+        if worst_case > -1.0:
+            print(
+                f"[{row.get('symbol', 'OPT')}] CAUSE FOUND: "
+                f"Worst path loss is only {worst_case:.2%}. "
+                "If you can't lose 100%, Kelly will suggest leverage > 1. "
+                "Check path generation or strike distance."
+            )
 
     return f_star, mean_r
