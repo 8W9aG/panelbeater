@@ -24,11 +24,13 @@ def test_liquidity_filter_removes_wide_spreads(mock_ticker_class, mock_sim_df):
 
     # 2. Create "Fishy" Option Data
     # Row 0: Healthy spread ($0.10)
-    # Row 1: Fishy spread ($2.93 - matching your index 1720)
+    # Row 1: Fishy spread needs to be > 40% to fail the new filter.
+    #        Old test was ~25% ($2.93/$11.57), which now PASSES.
+    #        New test: Bid $6.00 / Ask $12.00 = 50% spread -> FAILS.
     fishy_data = pd.DataFrame({
         "strike": [610.0, 626.0],
-        "bid": [6.00, 8.64],
-        "ask": [6.10, 11.57],
+        "bid": [6.00, 6.00],   # Changed from 8.64 to 6.00
+        "ask": [6.10, 12.00],  # Changed from 11.57 to 12.00
         "openInterest": [1000, 1000],
         "volume": [100, 100],
         "impliedVolatility": [0.2, 0.2],

@@ -78,13 +78,12 @@ def find_mispriced_options_comprehensive(
         initial_len = len(full_chain)
         total_chains_seen += initial_len
 
-        # --- LIQUIDITY FILTER START (SMART v2) ---
+        # --- LIQUIDITY FILTER START (SMART v3) ---
         # 1. Basic Volume/Interest Check
-        # We allow 0 volume if OI is high (e.g. morning trading)
         full_chain = full_chain[
-            (full_chain["openInterest"] > 10)
+            (full_chain["openInterest"] > 0)
             & (full_chain["volume"] >= 0)
-            & (full_chain["ask"] > 0.05)
+            & (full_chain["ask"] > 0.01)
         ].copy()
 
         # 2. Calculate Spreads
@@ -92,11 +91,10 @@ def find_mispriced_options_comprehensive(
         full_chain["rel_spread"] = full_chain["spread_width"] / full_chain["ask"]
 
         # 3. Smart Filter Logic
-        # Rule A: Percentage spread is healthy (<= 20%)
-        # Rule B: Dollar spread is tiny (<= $0.15), regardless of percentage.
-        #         (This saves cheap OTM options like Bid 0.20 / Ask 0.25)
-        liquidity_mask = (full_chain["rel_spread"] <= 0.20) | (
-            full_chain["spread_width"] <= 0.15
+        # Rule A: Relative spread <= 40% (Drops the expensive 50% spread case)
+        # Rule B: Dollar spread <= $0.50 (Saves the cheap 50% spread case)
+        liquidity_mask = (full_chain["rel_spread"] <= 0.40) | (
+            full_chain["spread_width"] <= 0.50
         )
 
         full_chain = full_chain[liquidity_mask].copy()
