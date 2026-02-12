@@ -67,6 +67,40 @@ def _cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([cs_rank, cs_z], axis=1)
 
 
+def _structural_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    """
+    Generates features describing the 'texture' and 'quality' of the price action.
+
+    1. Efficiency Ratio (ER): Signal-to-Noise ratio.
+       (Net Change) / (Sum of Absolute Changes).
+    2. Skewness: Measures the asymmetry of the rolling distribution.
+       Vital for 'World Models' to detect crash-prone regimes.
+    """
+    cols = df.columns.values.tolist()
+    for col in cols:
+        s = df[col]
+        for w in windows:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
+
+                # --- 1. Kaufman Efficiency Ratio (Fractal Efficiency) ---
+                # Calculation: |P_t - P_{t-n}| / Sum(|P_i - P_{i-1}|)
+                # Helps the model distinguish "Grinding Trends" vs "Choppy Ranges"
+                change = s.diff(w).abs()
+                volatility = s.diff(1).abs().rolling(w).sum()
+
+                # Handle division by zero for flat periods
+                er = change.div(volatility).replace([np.inf, -np.inf], 0).fillna(0)
+                df[f"{col}_er_{w}"] = er
+
+                # --- 2. Rolling Skewness ---
+                # Helps detecting "Tail Risk" regimes.
+                # Neural nets struggle to learn tail events without explicit moments.
+                df[f"{col}_skew_{w}"] = s.rolling(w).skew().fillna(0)
+
+    return df
+
+
 def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFrame:
     """Generate features on a dataframe."""
     # 1. Deduplicate inputs to prevent column collisions
@@ -82,6 +116,7 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
 
     # 3. Generate Time-Series Features (modifies df in-place)
     df = _ticker_features(df=df, windows=windows)
+    df = _structural_features(df=df, windows=windows)
 
     # 4. Generate Meta Features (Lags/Rolling of the expanded df)
     # Note: This will generate lags for the SMAs calculated in step 3 as well.

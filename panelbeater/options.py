@@ -78,6 +78,47 @@ def find_mispriced_options_comprehensive(
         initial_len = len(full_chain)
         total_chains_seen += initial_len
 
+        # =========================================================
+        # 🟢 INSERT DEBUG BLOCK HERE 🟢
+        # =========================================================
+        print(f"\n🔍 --- DATA QUALITY INSPECTION ({date_str}) ---")
+
+        # 1. Check for Zero/Null IV (The likely culprit for 'IV 0.00%')
+        zero_iv_mask = (full_chain["impliedVolatility"] <= 1e-6) | (
+            full_chain["impliedVolatility"].isna()
+        )
+        bad_iv_count = zero_iv_mask.sum()
+
+        if bad_iv_count > 0:
+            print(f"⚠️  WARNING: Found {bad_iv_count} contracts with 0.0 or NaN IV.")
+            # Show spread and price to see if these are garbage or valid strikes
+            print(
+                full_chain.loc[
+                    zero_iv_mask,
+                    [
+                        "contractSymbol",
+                        "strike",
+                        "lastPrice",
+                        "bid",
+                        "ask",
+                        "impliedVolatility",
+                    ],
+                ].head(5)
+            )
+
+        # 2. Check for Zero Price (Dead Quotes)
+        dead_quote_mask = (full_chain["bid"] <= 0.0) | (full_chain["ask"] <= 0.0)
+        print(
+            f"ℹ️  Dead Quotes (Bid or Ask <= 0): {dead_quote_mask.sum()} / {len(full_chain)}"
+        )
+
+        # 3. Quick Distribution Stats
+        if not full_chain.empty:
+            print(f"    IV Median:   {full_chain['impliedVolatility'].median():.2%}")
+            print(f"    IV Min:      {full_chain['impliedVolatility'].min():.2%}")
+        print("------------------------------------------")
+        # =========================================================
+
         # --- LIQUIDITY FILTER START (SMART v3) ---
         # 1. Basic Volume/Interest Check
         full_chain = full_chain[

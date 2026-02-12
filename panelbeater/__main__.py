@@ -24,6 +24,7 @@ _TICKERS = [
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
     "SI=F",  # Silver
+    "HG=F",  # Copper
     # FX
     "EURUSD=X",  # EUR/USD
     "USDJPY=X",  # USD/JPY
