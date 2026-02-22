@@ -216,3 +216,6 @@ monte_carlo*.png
 kelly_conviction*.png
 market_structure*.pkl
 .DS_Store
+
+# Custom
+upload.sh

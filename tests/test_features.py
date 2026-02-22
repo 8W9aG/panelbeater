@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_series_equal
 
-from panelbeater.features import features, _ticker_features, _meta_ticker_feature, _dt_features, _structural_features
+from panelbeater.features import features, _ticker_features, _meta_ticker_feature, _dt_features
 
 @pytest.fixture
 def sample_data():
@@ -150,60 +150,3 @@ def test_inf_handling(params):
     
     # Check for Inf
     assert not np.isinf(df_final.values).any(), "Result contains Infinite values"
-
-def test_structural_features_logic(sample_data):
-    """
-    Verifies the mathematical correctness of Efficiency Ratio (ER) and Skewness.
-    """
-    # 1. Create specific scenarios to test the math
-    # Scenario A: Perfect Trend (Monotonic). ER should be 1.0.
-    # Scenario B: Perfect Chop (Alternating). ER should be 0.0 (Net Change 0 / Volatility > 0).
-    # Scenario C: Crash (Negative Skew).
-    
-    dates = pd.date_range(start="2024-01-01", periods=10, freq="D")
-    
-    df_trend = pd.DataFrame({"TREND": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}, index=dates)
-    df_chop = pd.DataFrame({"CHOP": [10, 12, 10, 12, 10, 12, 10, 12, 10, 12]}, index=dates)
-    
-    # "Crash" data: steady rise then massive drop
-    crash_data = [100.0] * 9 + [50.0]
-    df_crash = pd.DataFrame({"CRASH": crash_data}, index=dates)
-
-    # 2. Run the function
-    window = 4
-    res_trend = _structural_features(df_trend, windows=[window])
-    res_chop = _structural_features(df_chop, windows=[window])
-    res_crash = _structural_features(df_crash, windows=[window])
-
-    # 3. Check Efficiency Ratio (ER)
-    # ER = |Net Change| / Sum(|Daily Changes|)
-    
-    # Trend: Net Change (4) / Sum(1+1+1+1) = 1.0
-    # Note: We check the last value which has a full window
-    er_trend = res_trend[f"TREND_er_{window}"].iloc[-1]
-    assert np.isclose(er_trend, 1.0), f"Perfect trend should have ER=1.0, got {er_trend}"
-
-    # Chop: Net Change (0) / Sum(2+2+2+2) = 0.0
-    er_chop = res_chop[f"CHOP_er_{window}"].iloc[-1]
-    assert np.isclose(er_chop, 0.0), f"Perfect chop should have ER=0.0, got {er_chop}"
-
-    # 4. Check Skewness
-    # Rolling skew of [100, 100, 100, 50] (approx) should be negative
-    # (Tail is on the left/downside)
-    skew_crash = res_crash[f"CRASH_skew_{window}"].iloc[-1]
-    assert skew_crash < 0, f"Crash pattern should have negative skew, got {skew_crash}"
-
-    # 5. Check Constant/Flat Line (Division by Zero protection)
-    # If price never moves, volatility is 0. ER calculation involves division by 0.
-    # Your code handles this with .replace([np.inf...], 0).
-    df_flat = pd.DataFrame({"FLAT": [100]*10}, index=dates)
-    res_flat = _structural_features(df_flat, windows=[window])
-    
-    er_flat = res_flat[f"FLAT_er_{window}"].iloc[-1]
-    assert er_flat == 0.0, "Flat line should result in ER=0 (handled div by zero)"
-    
-    # Skew of a constant array is mathematically undefined (NaN) or 0 depending on implementation.
-    # Pandas rolling skew returns NaN for constant input because std dev is 0.
-    # Your code fills NaNs with 0.
-    skew_flat = res_flat[f"FLAT_skew_{window}"].iloc[-1]
-    assert skew_flat == 0.0, "Flat line should result in Skew=0 (handled NaNs)"

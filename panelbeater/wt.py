@@ -15,4 +15,6 @@ def create_wt() -> wavetrainer.trainer.Trainer:  # pyright: ignore
         allowed_models={"catboost"},
         max_false_positive_reduction_steps=0,
         use_power_transformer=True,
+        use_correlation_reducer=True,
+        n_jobs=-1,
     )
