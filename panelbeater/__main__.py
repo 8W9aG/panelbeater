@@ -20,6 +20,7 @@ _TICKERS = [
     "HYG",  # iShares iBoxx $ High Yield Corporate Bond ETF
     "TLT",  # iShares 20+ Year Treasury Bond ETF
     "SPYD",  # State Street SPDR Portfolio S&P 500 High Dividend ETF
+    "BITO",  # ProShares Bitcoin ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
