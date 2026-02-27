@@ -46,6 +46,7 @@ _MACROS = [
     "DTWEXBGS",  # Nominal Broad U.S. Dollar Index
     "INDPRO",  # Industrial Production: Total Index
     "BAMLH0A0HYM2",  # ICE BofA US High Yield Index Option-Adjusted Spread
+    "DCOILWTICO",  # Crude Oil Prices: West Texas Intermediate (WTI) - Cushing, Oklahoma
     # Indexes
     "^IRX",  # 13 WEEK TREASURY BILL
 ]

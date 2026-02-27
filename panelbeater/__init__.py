@@ -7,7 +7,7 @@ from .sync import sync_positions
 from .trades import process_and_classify_trades, trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.60"
+__VERSION__ = "0.2.61"
 __all__ = [
     "download",
     "fit",

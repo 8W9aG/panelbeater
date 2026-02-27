@@ -29,6 +29,8 @@ def _load_yahoo_prices(tickers: list[str]) -> pd.DataFrame:
         end=None,
         auto_adjust=True,
         progress=False,
+        proxy=None,
+        session=None,
     )
     if px is None or px.empty:
         raise ValueError("px is null or empty")
