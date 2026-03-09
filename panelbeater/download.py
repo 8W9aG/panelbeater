@@ -76,18 +76,24 @@ def _load_macro_series(
                 df["date"] = pd.to_datetime(df["date"])
                 df["realtime_start"] = pd.to_datetime(df["realtime_start"])
 
-                def select_latest(group: pd.DataFrame) -> pd.DataFrame:
-                    return group[  # pyright: ignore
-                        group["realtime_start"] == group["realtime_start"].max()
-                    ]
+                # FIX 1: Sort chronologically by observation date
+                df = df.sort_values(by="date")
 
-                df = df.groupby("date").apply(select_latest)
-                # Ensure the index is converted back to DatetimeIndex after grouping
-                df.index = pd.to_datetime(df.index.get_level_values("date"))
-                dfs.append(df["value"].rename(code))  # pyright: ignore
+                # FIX 2: Find the FIRST time each observation was released (prevents lookahead bias)
+                first_releases = df.loc[df.groupby("date")["realtime_start"].idxmin()]
+
+                # FIX 3: Set the index to the REPORTING DATE, not the observation date
+                first_releases = first_releases.set_index("realtime_start")
+
+                # FIX 4: If multiple historical dates were published on the same day,
+                # keep only the most recent observation for that reporting date
+                first_releases = first_releases.groupby(level=0).tail(1)
+
+                first_releases.index = pd.to_datetime(first_releases.index)
+                dfs.append(first_releases["value"].rename(code))  # pyright: ignore
             except Exception:
+                # Fallback to standard series (Warning: this will have lookahead bias)
                 df = client.get_series(code)
-                # FIX: Ensure FRED index is a DatetimeIndex
                 df.index = pd.to_datetime(df.index)
                 dfs.append(df.rename(code))
 
@@ -101,7 +107,7 @@ def _load_macro_series(
     macro.index = pd.to_datetime(macro.index)
     macro = macro.sort_index()
 
-    # Now asfreq("D") will work because the index is a DatetimeIndex
+    # asfreq("D") works cleanly with the reporting date index
     macro = macro.asfreq("D").ffill()
     return macro
 
