@@ -47,6 +47,7 @@ _MACROS = [
     "INDPRO",  # Industrial Production: Total Index
     "BAMLH0A0HYM2",  # ICE BofA US High Yield Index Option-Adjusted Spread
     "DCOILWTICO",  # Crude Oil Prices: West Texas Intermediate (WTI) - Cushing, Oklahoma
+    "TRFVOLUSM227NFWA",  # Vehicle Miles Traveled
     # Indexes
     "^IRX",  # 13 WEEK TREASURY BILL
 ]
@@ -71,7 +72,7 @@ def main() -> None:
         "--inference",
         help="Whether to do inference.",
         required=False,
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
     )
     parser.add_argument(
@@ -85,7 +86,7 @@ def main() -> None:
         "--trades",
         help="Whether to generate trades.",
         required=False,
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
     )
     parser.add_argument(

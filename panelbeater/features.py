@@ -1,5 +1,6 @@
 """Generate features over a dataframe."""
 
+# pylint: disable=too-many-locals
 import warnings
 
 import numpy as np
@@ -9,16 +10,29 @@ from feature_engine.datetime import DatetimeFeatures
 
 def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     cols = df.columns.values.tolist()
+
+    # Establish the maximum window to act as our long-term baseline for volatility
+    max_window = max(windows) if windows else 1
+
     for col in cols:
         s = df[col]
+
+        # Calculate daily returns once per ticker to save compute
+        daily_returns = s.pct_change(fill_method=None)
+
+        # Pre-calculate baseline long-term volatility (standard deviation of returns)
+        baseline_vol = daily_returns.rolling(max_window).std()
+
         for w in windows:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
                 # SMA
                 sma = s.rolling(w).mean()
                 df[f"{col}_sma_{w}"] = sma / s - 1
+
                 # PCT
                 df[f"{col}_pctchg_{w}"] = s.pct_change(w, fill_method=None)
+
                 # Z-Score
                 mu = s.rolling(w).mean()
                 sigma = s.rolling(w).std()
@@ -38,6 +52,20 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
                 # Helps detecting "Tail Risk" regimes.
                 # Neural nets struggle to learn tail events without explicit moments.
                 df[f"{col}_skew_{w}"] = s.rolling(w).skew().fillna(0)
+
+                # --- 3. Volatility Regime Ratios ---
+                # Calculation: w-period Volatility / max_window Volatility
+                # Helps the model recognize expansion vs contraction environments.
+                current_vol = daily_returns.rolling(w).std()
+
+                # Handle division by zero for completely flat periods
+                vol_ratio = (
+                    current_vol.div(baseline_vol)
+                    .replace([np.inf, -np.inf], 0)
+                    .fillna(0)
+                )
+                df[f"{col}_vol_regime_{w}"] = vol_ratio
+
     return df
 
 
