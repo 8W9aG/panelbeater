@@ -14,11 +14,15 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     # Establish the maximum window to act as our long-term baseline for volatility
     max_window = max(windows) if windows else 1
 
+    # --- OPTIMIZATION: Calculate all returns and the market index once ---
+    all_daily_returns = df.pct_change(fill_method=None)
+    market_index = all_daily_returns.mean(axis=1)
+
     for col in cols:
         s = df[col]
 
-        # Calculate daily returns once per ticker to save compute
-        daily_returns = s.pct_change(fill_method=None)
+        # Slice the pre-calculated returns for this ticker
+        daily_returns = all_daily_returns[col]
 
         # Pre-calculate baseline long-term volatility (standard deviation of returns)
         baseline_vol = daily_returns.rolling(max_window).std()
@@ -26,45 +30,63 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
         for w in windows:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=pd.errors.PerformanceWarning)
+                roll = s.rolling(w)
+
                 # SMA
-                sma = s.rolling(w).mean()
+                sma = roll.mean()
                 df[f"{col}_sma_{w}"] = sma / s - 1
 
                 # PCT
                 df[f"{col}_pctchg_{w}"] = s.pct_change(w, fill_method=None)
 
                 # Z-Score
-                mu = s.rolling(w).mean()
-                sigma = s.rolling(w).std()
+                mu = roll.mean()
+                sigma = roll.std()
                 df[f"{col}_z_{w}"] = (s - mu) / sigma
 
                 # --- 1. Kaufman Efficiency Ratio (Fractal Efficiency) ---
-                # Calculation: |P_t - P_{t-n}| / Sum(|P_i - P_{i-1}|)
-                # Helps the model distinguish "Grinding Trends" vs "Choppy Ranges"
                 change = s.diff(w).abs()
                 volatility = s.diff(1).abs().rolling(w).sum()
-
-                # Handle division by zero for flat periods
                 er = change.div(volatility).replace([np.inf, -np.inf], 0).fillna(0)
                 df[f"{col}_er_{w}"] = er
 
-                # --- 2. Rolling Skewness ---
-                # Helps detecting "Tail Risk" regimes.
-                # Neural nets struggle to learn tail events without explicit moments.
-                df[f"{col}_skew_{w}"] = s.rolling(w).skew().fillna(0)
+                # --- 2. Rolling Skewness & Kurtosis ---
+                df[f"{col}_skew_{w}"] = roll.skew().fillna(0)
+                df[f"{col}_kurt_{w}"] = roll.kurt().fillna(0)
 
                 # --- 3. Volatility Regime Ratios ---
-                # Calculation: w-period Volatility / max_window Volatility
-                # Helps the model recognize expansion vs contraction environments.
                 current_vol = daily_returns.rolling(w).std()
-
-                # Handle division by zero for completely flat periods
                 vol_ratio = (
                     current_vol.div(baseline_vol)
                     .replace([np.inf, -np.inf], 0)
                     .fillna(0)
                 )
                 df[f"{col}_vol_regime_{w}"] = vol_ratio
+
+                # --- 4. Bollinger Band Width (Volatility Squeeze) ---
+                # 4 sigma covers ~95% of data (2 up, 2 down)
+                bb_width = (4 * sigma) / mu
+                df[f"{col}_bbwidth_{w}"] = bb_width.replace([np.inf, -np.inf], 0)
+
+                # --- 5. Rolling Autocorrelation (Serial Correlation) ---
+                autocorr = daily_returns.rolling(w).corr(daily_returns.shift(1))
+                df[f"{col}_autocorr_{w}"] = autocorr.fillna(0)
+
+                # --- 6. RSI (Relative Strength Index) - Vectorized ---
+                diff = s.diff(1)
+                gain = diff.clip(lower=0).rolling(w).mean()
+                loss = -1 * diff.clip(upper=0).rolling(w).mean()
+
+                # Safe division for RS
+                rs = gain / loss.replace(0, np.nan)  # type: ignore
+                rsi = 1 - (1 / (1 + rs))
+                # If loss is 0 (no down days), RSI is 1.0 (100 in standard RSI terms)
+                df[f"{col}_rsi_{w}"] = rsi.fillna(1.0)
+
+                # --- 7. Market Physics (Rolling Beta) ---
+                # "Is this asset decoupled from the market?"
+                beta_proxy = daily_returns.rolling(w).corr(market_index)  # type: ignore
+                df[f"{col}_beta_{w}"] = beta_proxy.fillna(0)
 
     return df
 
@@ -90,21 +112,16 @@ def _cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Generates relative strength features across the panel at each timestamp.
     """
-    # 1. Cross-Sectional Rank (0.0 to 1.0)
-    # Good for Neural Networks/KANs as it creates a bounded, robust distribution
-    # uniform across time, handling outliers well.
-    # FIX: Rank based on 1-day returns (Relative Strength), not nominal price
-    # "Who is winning today?"
     daily_returns = df.pct_change(fill_method=None)
+
+    # 1. Cross-Sectional Rank (0.0 to 1.0)
     cs_rank = daily_returns.rank(axis=1, pct=True).add_suffix("_xs_rank")
 
     # 2. Cross-Sectional Z-Score (Distance from Market Mean)
-    # Measures how many standard deviations an asset is from the daily panel mean.
-    # Effectively removes the 'Market Factor' to focus on relative performance.
-    mean = df.mean(axis=1)
-    std = df.std(axis=1)
-    # Broadcast subtraction/division across columns
-    cs_z = df.sub(mean, axis=0).div(std, axis=0)
+    mean = daily_returns.mean(axis=1)
+    std = daily_returns.std(axis=1)
+
+    cs_z = daily_returns.sub(mean, axis=0).div(std, axis=0)
     cs_z = cs_z.add_suffix("_xs_z")
 
     return pd.concat([cs_rank, cs_z], axis=1)
@@ -119,15 +136,12 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     original_cols = df.columns.values.tolist()
 
     # 2. Generate Cross-Sectional Features (Use ONLY original cols)
-    # We do this first on the raw data to ensure we are ranking
-    # the assets against each other, not against their own SMAs.
     df_xs = _cross_sectional_features(df[original_cols])  # pyright: ignore
 
-    # 3. Generate Time-Series Features (modifies df in-place)
+    # 3. Generate Time-Series & Market Physics Features (modifies df in-place)
     df = _ticker_features(df=df, windows=windows)
 
     # 4. Generate Meta Features (Lags/Rolling of the expanded df)
-    # Note: This will generate lags for the SMAs calculated in step 3 as well.
     df = _meta_ticker_feature(df, lags=lags, windows=windows)
 
     # 5. Merge Cross-Sectional Features
@@ -137,6 +151,4 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     df = _dt_features(df=df)
 
     # 7. Final Clean up
-    # Drop original raw prices (optional, but standard if differencing)
-    # shift(1) ensures we don't leak the future (predicting t using t-1 data)
     return df.drop(columns=original_cols).shift(1)
