@@ -1,7 +1,7 @@
 """Handle simulations from the models."""
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
 import pyvinecopulib as pv
@@ -24,6 +24,7 @@ def run_single_simulation(
     windows: list[int],
     lags: list[int],
     vine_cop: pv.Vinecop,
+    save_state_func: Callable[[int, pd.DataFrame, bool], Any] | None = None,
 ):
     """
     Encapsulates a single Monte Carlo path generation.
@@ -44,6 +45,9 @@ def run_single_simulation(
             columns=df_x.columns.values.tolist()
         )
         df_y = denormalize(df_next, y=df_y.copy(), u_sample=u_step)
+
+        if save_state_func is not None:
+            save_state_func(sim_idx, df_y, False)
 
     # Mark the simulation index and return only the relevant tail (for memory efficiency)
     df_result = df_y.tail(days_out + 1).copy()
@@ -70,7 +74,7 @@ def simulate(
         # n_jobs=-1 uses all available CPU cores
         all_sims = Parallel(n_jobs=-1)(
             delayed(run_single_simulation)(
-                i, df_y.copy(), days_out, windows, lags, vine_cop
+                i, df_y.copy(), days_out, windows, lags, vine_cop, None
             )
             for i in tqdm.tqdm(range(sims), desc="Simulating")
         )

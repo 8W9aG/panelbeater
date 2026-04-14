@@ -47,6 +47,7 @@ def normalize(df: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
         for unique_val in df_norm[col].unique():
             if math.isnan(unique_val):
                 continue
+            unique_val = unique_val + 0.0
             s = (df_norm[col] == unique_val).rename(f"{col}_{unique_val}")
             dfs.append(s)
 

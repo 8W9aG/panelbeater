@@ -177,12 +177,12 @@ def test_normalize_horizon_logic():
     buckets_h2 = get_active_bucket(df_h2, idx_check)
 
     # In H2 (0% change), the active bucket should be 'close_0.0'
-    assert "close_-0.0" in buckets_h2
+    assert "close_0.0" in buckets_h2
     
     # In H1 (Drop), the active bucket should be negative (e.g., 'close_-3.0' or similar depending on sigma)
     # Since the history is mostly flat, sigma is low, so a -5 drop is likely a large sigma move (-3.0)
     print(f"H1 Buckets: {buckets_h1}")
-    assert "close_-0.0" not in buckets_h1
+    assert "close_0.0" not in buckets_h1
     assert buckets_h1 != buckets_h2
 
 def test_normalize_structure():
