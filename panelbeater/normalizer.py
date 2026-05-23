@@ -2,9 +2,11 @@
 
 # pylint: disable=too-many-locals,line-too-long,too-many-statements,too-many-locals
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
+from pandas.errors import PerformanceWarning
 from wavetrainer.model.model import PROBABILITY_COLUMN_PREFIX
 
 
@@ -65,8 +67,10 @@ def denormalize(
 ) -> pd.DataFrame:
     """Denormalize the dataframe back to a total value."""
     df = df.reindex(y.index)
-    for col in y.columns:
-        df[col] = y[col]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=PerformanceWarning)
+        for col in y.columns:
+            df[col] = y[col]
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())

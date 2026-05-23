@@ -22,6 +22,7 @@ _TICKERS = [
     "SPYD",  # State Street SPDR Portfolio S&P 500 High Dividend ETF
     "BITO",  # ProShares Bitcoin ETF
     "IWM",  # iShares Russell 2000 ETF
+    "SMH",  # VanEck Semiconductor ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil

@@ -2,6 +2,7 @@
 
 # pylint: disable=invalid-name,global-statement,unused-argument,broad-exception-caught
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,32 @@ def _get_fred_client() -> Fred:
     if _FRED_CLIENT is None:
         _FRED_CLIENT = Fred(api_key=os.environ["FRED_API_KEY"])
     return _FRED_CLIENT
+
+
+def _fetch_fred_with_retry(func, *args, max_retries=3, **kwargs):
+    """Helper to retry FRED API calls with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_str = str(e)
+
+            # Do not retry deterministic 400 errors (like the vintage dates limit)
+            if "exceeds the maximum number of vintage dates" in error_str:
+                raise
+
+            # If we haven't hit the max retries, wait and try again
+            if attempt < max_retries - 1:
+                sleep_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s...
+                # Using tqdm.write instead of print prevents messy progress bar overlapping
+                tqdm.tqdm.write(
+                    f"API Error ({error_str}). Retrying in {sleep_time}s..."
+                )
+                time.sleep(sleep_time)
+            else:
+                tqdm.tqdm.write("Max retries reached for FRED API.")
+                raise
+            return None
 
 
 def _load_yahoo_prices(tickers: list[str]) -> pd.DataFrame:
@@ -72,7 +99,11 @@ def _load_macro_series(
         client = _get_fred_client()
         for code in tqdm.tqdm(fred_codes, desc="Downloading FRED macros"):
             try:
-                df = client.get_series_all_releases(code)
+                # Wrapped in retry logic
+                df = _fetch_fred_with_retry(client.get_series_all_releases, code)
+                if df is None:
+                    raise ValueError("Could not download FRED series")
+
                 df["date"] = pd.to_datetime(df["date"])
                 df["realtime_start"] = pd.to_datetime(df["realtime_start"])
 
@@ -91,11 +122,22 @@ def _load_macro_series(
 
                 first_releases.index = pd.to_datetime(first_releases.index)
                 dfs.append(first_releases["value"].rename(code))  # pyright: ignore
-            except Exception:
+
+            except Exception as e:
                 # Fallback to standard series (Warning: this will have lookahead bias)
-                df = client.get_series(code)
-                df.index = pd.to_datetime(df.index)
-                dfs.append(df.rename(code))
+                tqdm.tqdm.write(f"Fallback to standard series for {code} due to: {e}")
+                try:
+                    # Wrap the fallback in retry logic as well, in case it hits a 500 error
+                    df = _fetch_fred_with_retry(client.get_series, code)
+                    if df is None:
+                        raise ValueError("Could not download FRED series") from e
+                    df.index = pd.to_datetime(df.index)
+                    dfs.append(df.rename(code))
+                except Exception as fallback_e:
+                    tqdm.tqdm.write(
+                        f"Completely failed to fetch {code} after fallback: {fallback_e}"
+                    )
+                    raise fallback_e
 
     if not dfs:
         return pd.DataFrame()
