@@ -50,6 +50,7 @@ _MACROS = [
     "BAMLH0A0HYM2",  # ICE BofA US High Yield Index Option-Adjusted Spread
     "DCOILWTICO",  # Crude Oil Prices: West Texas Intermediate (WTI) - Cushing, Oklahoma
     "TRFVOLUSM227NFWA",  # Vehicle Miles Traveled
+    "T10YIE",  # 10-Year Breakeven Inflation Rate
     # Indexes
     "^IRX",  # 13 WEEK TREASURY BILL
 ]
@@ -64,6 +65,13 @@ _WINDOWS = [
 _LAGS = [1, 3, 5, 10, 20, 30]
 _DAYS_OUT = 32
 _SIMS = 1000
+
+# --- NEW: Quantile & Flagged Target Configurations ---
+_NUM_QUANTILES = 10
+
+# Assets and Macros that will receive the KDE tail treatment
+_FLAGGED_TICKERS: list[str] = []
+_FLAGGED_MACROS: list[str] = []
 
 
 def main() -> None:
@@ -98,6 +106,15 @@ def main() -> None:
         default=False,
         action=argparse.BooleanOptionalAction,
     )
+
+    # --- NEW: CLI override for quantiles ---
+    parser.add_argument(
+        "--quantiles",
+        help="Number of quantile bins to generate.",
+        type=int,
+        required=False,
+        default=_NUM_QUANTILES,
+    )
     args = parser.parse_args()
 
     # Setup main objects
@@ -106,11 +123,23 @@ def main() -> None:
     # Fit the models
     df_y = download(tickers=_TICKERS, macros=_MACROS, session=session)
     if args.train:
-        fit(df_y=df_y, windows=_WINDOWS, lags=_LAGS)
+        fit(
+            df_y=df_y,
+            windows=_WINDOWS,
+            lags=_LAGS,
+            quantiles=args.quantiles,
+            flagged_tickers=_FLAGGED_TICKERS,
+            flagged_macros=_FLAGGED_MACROS,
+        )
 
     if args.inference:
         simulate(
-            sims=_SIMS, df_y=df_y, days_out=_DAYS_OUT, windows=_WINDOWS, lags=_LAGS
+            sims=_SIMS,
+            df_y=df_y,
+            days_out=_DAYS_OUT,
+            windows=_WINDOWS,
+            lags=_LAGS,
+            quantiles=args.quantiles,
         )
 
     if args.trades:

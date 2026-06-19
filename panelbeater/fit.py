@@ -1,6 +1,6 @@
 """Handles fitting models."""
 
-# pylint: disable=too-many-locals,invalid-name
+# pylint: disable=too-many-locals,invalid-name,too-many-arguments,too-many-positional-arguments
 import warnings
 from typing import Any, Callable
 
@@ -18,6 +18,10 @@ def fit(
     lags: list[int],
     fit_func: Callable[[pd.DataFrame, pd.DataFrame, Any], None] | None = None,
     horizons: list[int] | None = None,
+    # --- NEW PARAMETERS ---
+    quantiles: int | None = None,
+    flagged_tickers: list[str] | None = None,
+    flagged_macros: list[str] | None = None,
 ) -> None:
     """Fit the models."""
     wavetrainer = create_wt()
@@ -28,13 +32,22 @@ def fit(
         returns = returns.to_frame()
     fit_vine_copula(returns)
     df_x = features(df=df_y.copy(), windows=windows, lags=lags)
-    df_y_norm = normalize(df=df_y.copy())
+
+    # --- UPDATED: Pass config down to normalize ---
+    df_y_norm = normalize(
+        df=df_y.copy(),
+        quantiles=quantiles,
+        flagged_tickers=flagged_tickers,
+        flagged_macros=flagged_macros,
+    )
+
     if fit_func is None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             wavetrainer.fit(df_x, y=df_y_norm)
     else:
         fit_func(df_x, df_y_norm, wavetrainer)
+
     if horizons is not None:
         horizons = sorted(horizons)
         current_df_x = df_x.copy()
@@ -48,8 +61,14 @@ def fit(
             fit_vine_copula(returns_h, horizon=h)
 
             # 1. Normalize SPECIFICALLY for this horizon
-            # This calculates the change over 'h' days (e.g., 32-day return)
-            df_y_h_raw = normalize(df=df_y.copy(), horizon=h)
+            # --- UPDATED: Pass config down to normalize ---
+            df_y_h_raw = normalize(
+                df=df_y.copy(),
+                horizon=h,
+                quantiles=quantiles,
+                flagged_tickers=flagged_tickers,
+                flagged_macros=flagged_macros,
+            )
 
             # 2. Shift Backwards
             # The return calculated at day T represents (Price_T - Price_T-h).

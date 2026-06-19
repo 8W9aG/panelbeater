@@ -7,6 +7,7 @@ import pandas as pd
 import pyvinecopulib as pv
 import tqdm
 from joblib import Parallel, delayed
+from scipy import stats
 
 from .copula import load_vine_copula, sample_joint_step
 from .features import features
@@ -17,6 +18,47 @@ SIMULATION_COLUMN = "simulation"
 SIMULATION_FILENAME = "sims.parquet"
 
 
+def precompute_kdes(df_y: pd.DataFrame, quantiles: int) -> dict:
+    """Precomputes KDEs for all quantiles across all assets."""
+    kdes: dict[str, dict[int, dict[str, Any] | None]] = {}
+    for col in df_y.columns:
+        # Get the full historical percentage changes
+        returns = df_y[col].pct_change().dropna()
+        kdes[col] = {}
+
+        for q in range(quantiles):
+            lower_pctile = q / quantiles
+            upper_pctile = (q + 1) / quantiles
+
+            lower_bound = returns.quantile(lower_pctile)
+            upper_bound = returns.quantile(upper_pctile)
+
+            # Slice the data for this specific quantile
+            if q == 0:
+                q_data = returns[returns <= upper_bound]
+                min_valid, max_valid = -1.0, upper_bound
+            elif q == quantiles - 1:
+                q_data = returns[returns >= lower_bound]
+                min_valid, max_valid = lower_bound, float("inf")
+            else:
+                q_data = returns[(returns >= lower_bound) & (returns <= upper_bound)]
+                min_valid, max_valid = lower_bound, upper_bound
+
+            # Fit the KDE if there is enough variance
+            if len(q_data) > 1 and q_data.std() > 0:
+                kdes[col][q] = {
+                    "kde": stats.gaussian_kde(q_data),
+                    "min": min_valid,
+                    "max": max_valid,
+                    "fallback_min": lower_bound,
+                    "fallback_max": upper_bound,
+                }
+            else:
+                kdes[col][q] = None  # Fallback to uniform if data is weirdly flat
+
+    return kdes
+
+
 def run_single_simulation(
     sim_idx: int,
     df_y,
@@ -25,6 +67,9 @@ def run_single_simulation(
     lags: list[int],
     vine_cop: pv.Vinecop,
     save_state_func: Callable[[int, pd.DataFrame, bool], Any] | None = None,
+    # --- NEW PARAMETERS ---
+    quantiles: int | None = None,
+    precomputed_kdes: dict | None = None,
 ):
     """
     Encapsulates a single Monte Carlo path generation.
@@ -44,7 +89,15 @@ def run_single_simulation(
         df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
             columns=df_x.columns.values.tolist()
         )
-        df_y = denormalize(df_next, y=df_y.copy(), u_sample=u_step)
+
+        # --- UPDATED: Pass quantiles and KDEs down to denormalize ---
+        df_y = denormalize(
+            df_next,
+            y=df_y.copy(),
+            u_sample=u_step,
+            quantiles=quantiles,
+            precomputed_kdes=precomputed_kdes,
+        )
 
         if save_state_func is not None:
             save_state_func(sim_idx, df_y, False)
@@ -65,21 +118,39 @@ def simulate(
         [int, pd.DataFrame, int, list[int], list[int], pv.Vinecop], list[pd.DataFrame]
     ]
     | None = None,
+    # --- NEW PARAMETERS ---
+    quantiles: int | None = None,
 ) -> pd.DataFrame:
     """Simulate from trained models."""
     print(f"Starting {sims} simulations in parallel...")
     vine_cop = load_vine_copula(df_returns=df_y)
     print("Loaded vine copula")
+
+    # --- NEW: Precompute the KDEs once before the parallel loop ---
+    precomputed_kdes = None
+    if quantiles is not None:
+        print("Precomputing KDE distributions...")
+        precomputed_kdes = precompute_kdes(df_y, quantiles)
+
     if sim_func is None:
         # n_jobs=-1 uses all available CPU cores
         all_sims = Parallel(n_jobs=-1)(
             delayed(run_single_simulation)(
-                i, df_y.copy(), days_out, windows, lags, vine_cop, None
+                i,
+                df_y.copy(),
+                days_out,
+                windows,
+                lags,
+                vine_cop,
+                None,
+                quantiles,
+                precomputed_kdes,  # --- UPDATED: Pass to parallel worker ---
             )
             for i in tqdm.tqdm(range(sims), desc="Simulating")
         )
     else:
         all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_cop)
+
     # Combine all simulations into one large DataFrame
     df_mc = pd.concat(all_sims)  # type: ignore
     df_mc.to_parquet(SIMULATION_FILENAME)
