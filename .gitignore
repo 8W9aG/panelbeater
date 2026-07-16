@@ -219,3 +219,8 @@ market_structure*.pkl
 
 # Custom
 upload.sh
+dependencies.py
+generate_model_report.py
+simulation_charts
+model_evaluation_tearsheet.txt
+Model_Evaluation_Report.pdf

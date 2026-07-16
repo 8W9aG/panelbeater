@@ -23,6 +23,7 @@ _TICKERS = [
     "BITO",  # ProShares Bitcoin ETF
     "IWM",  # iShares Russell 2000 ETF
     "SMH",  # VanEck Semiconductor ETF
+    "VNQ",  # Vanguard Real Estate Index Fund ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
