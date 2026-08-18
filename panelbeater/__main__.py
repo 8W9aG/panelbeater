@@ -24,6 +24,7 @@ _TICKERS = [
     "IWM",  # iShares Russell 2000 ETF
     "SMH",  # VanEck Semiconductor ETF
     "VNQ",  # Vanguard Real Estate Index Fund ETF
+    "QCOM",  # QUALCOMM Incorporated
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
@@ -68,7 +69,7 @@ _DAYS_OUT = 32
 _SIMS = 1000
 
 # --- NEW: Quantile & Flagged Target Configurations ---
-_NUM_QUANTILES = 10
+_NUM_QUANTILES = 5
 
 # Assets and Macros that will receive the KDE tail treatment
 _FLAGGED_TICKERS: list[str] = []
@@ -131,6 +132,7 @@ def main() -> None:
             quantiles=args.quantiles,
             flagged_tickers=_FLAGGED_TICKERS,
             flagged_macros=_FLAGGED_MACROS,
+            n_jobs=2,
         )
 
     if args.inference:

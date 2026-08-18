@@ -1,10 +1,11 @@
 """Generate features over a dataframe."""
 
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,broad-exception-caught
 import warnings
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from feature_engine.datetime import DatetimeFeatures
 
 
@@ -42,12 +43,16 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
                 # Z-Score
                 mu = roll.mean()
                 sigma = roll.std()
-                df[f"{col}_z_{w}"] = (s - mu) / sigma
+
+                # Protect against zero variance
+                safe_sigma = sigma.replace(0.0, np.nan)
+                df[f"{col}_z_{w}"] = ((s - mu) / safe_sigma).fillna(0.0)
 
                 # --- 1. Kaufman Efficiency Ratio (Fractal Efficiency) ---
                 change = s.diff(w).abs()
                 volatility = s.diff(1).abs().rolling(w).sum()
-                er = change.div(volatility).replace([np.inf, -np.inf], 0).fillna(0)
+                # Protect volatility division BEFORE the replace/fillna
+                er = change.div(volatility.replace(0.0, np.nan)).fillna(0)
                 df[f"{col}_er_{w}"] = er
 
                 # --- 2. Rolling Skewness & Kurtosis ---
@@ -65,8 +70,17 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
 
                 # --- 4. Bollinger Band Width (Volatility Squeeze) ---
                 # 4 sigma covers ~95% of data (2 up, 2 down)
-                bb_width = (4 * sigma) / mu
-                df[f"{col}_bbwidth_{w}"] = bb_width.replace([np.inf, -np.inf], 0)
+                bb_width = (4 * sigma) / mu.replace(0.0, np.nan)
+                df[f"{col}_bbwidth_{w}"] = bb_width.fillna(0)
+
+                # New normalized version (Min-Max bounded strictly between 0.0 and 1.0)
+                # We calculate a temporary safe width so rolling min/max
+                # avoids the overflow outliers
+                safe_width = (4 * sigma) / (mu.abs() + 1e-8)
+                roll_min = safe_width.rolling(w).min()
+                roll_max = safe_width.rolling(w).max()
+                bb_width_norm = (safe_width - roll_min) / (roll_max - roll_min + 1e-8)
+                df[f"{col}_bbwidthnorm_{w}"] = bb_width_norm.fillna(0)
 
                 # --- 5. Rolling Autocorrelation (Serial Correlation) ---
                 autocorr = daily_returns.rolling(w).corr(daily_returns.shift(1))
@@ -121,10 +135,97 @@ def _cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     mean = daily_returns.mean(axis=1)
     std = daily_returns.std(axis=1)
 
-    cs_z = daily_returns.sub(mean, axis=0).div(std, axis=0)
+    # --- FIX: Prevent ZeroDivisionError on stagnant days ---
+    # Replace 0.0 with NaN so division yields NaN instead of an exception,
+    # then fill the NaN z-scores back to 0.0
+    safe_std = std.replace(0.0, np.nan)
+    cs_z = daily_returns.sub(mean, axis=0).div(safe_std, axis=0).fillna(0.0)
     cs_z = cs_z.add_suffix("_xs_z")
 
     return pd.concat([cs_rank, cs_z], axis=1)
+
+
+def fetch_yfinance_earnings(ticker: str, limit: int = 100) -> pd.DatetimeIndex:
+    """
+    Safely fetch earnings dates. Returns an empty DatetimeIndex if
+    the asset is an ETF (e.g., SPY) or has no earnings history.
+    """
+    try:
+        t = yf.Ticker(ticker)
+
+        # Suppress yfinance stdout/warnings for cleaner bulk processing
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            dates_df = t.get_earnings_dates(limit=limit)
+
+        # Handle SPY, indices, or missing data
+        if dates_df is None or dates_df.empty:
+            return pd.DatetimeIndex([])
+
+        # Strip timezone and normalize to midnight for exact date alignment
+        return (
+            pd.to_datetime(dates_df.index).tz_localize(None).normalize().sort_values()
+        )
+
+    except Exception:  # noqa
+        # Catch internal yfinance parsing errors on unsupported assets
+        return pd.DatetimeIndex([])
+
+
+def _compute_earnings_distances(
+    target_idx: pd.DatetimeIndex, cal_idx: pd.DatetimeIndex, prefix: str
+) -> pd.DataFrame:
+    """
+    Vectorized computation of days since last earnings and days until next earnings.
+    """
+    # --- Edge Case: Asset has no earnings (e.g., SPY) ---
+    if cal_idx.empty:
+        return pd.DataFrame(
+            {f"{prefix}_days_since_earn": np.nan, f"{prefix}_days_until_earn": np.nan},
+            index=target_idx,
+        )
+
+    # Prepare dataframes for merge_asof (must be sorted)
+    df_target = pd.DataFrame(index=target_idx.normalize()).sort_index()
+    df_cal = pd.DataFrame({"cal_date": cal_idx}, index=cal_idx).sort_index()
+
+    # Backward look: Most recent past date
+    past = pd.merge_asof(
+        df_target, df_cal, left_index=True, right_index=True, direction="backward"
+    )
+    days_since = (df_target.index - past["cal_date"]).dt.days
+
+    # Forward look: Next upcoming date
+    future = pd.merge_asof(
+        df_target, df_cal, left_index=True, right_index=True, direction="forward"
+    )
+    days_until = (future["cal_date"] - df_target.index).dt.days
+
+    return pd.DataFrame(
+        {
+            f"{prefix}_days_since_earn": days_since,
+            f"{prefix}_days_until_earn": days_until,
+        },
+        index=target_idx,
+    )
+
+
+def _apply_calendar_features(
+    df: pd.DataFrame, original_cols: list[str], earnings_dict: dict
+) -> pd.DataFrame:
+    cal_features = []
+
+    for col in original_cols:
+        cal_idx = earnings_dict.get(col, pd.DatetimeIndex([]))
+
+        # Calculate distances (will return NaNs for SPY/empty calendars)
+        earn_df = _compute_earnings_distances(df.index, cal_idx, prefix=col)
+        cal_features.append(earn_df)
+
+    if cal_features:
+        return pd.concat([df] + cal_features, axis=1)
+
+    return df
 
 
 def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFrame:
@@ -150,5 +251,19 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     # 6. Datetime Features
     df = _dt_features(df=df)
 
-    # 7. Final Clean up
+    # 7. Dynamically generate the earnings dictionary with namespace filtering
+    earnings_dict = {}
+    for col in original_cols:
+        if col.startswith("MACRO_"):
+            # Macros do not have corporate earnings
+            earnings_dict[col] = pd.DatetimeIndex([])
+        else:
+            # Strip 'PX_' prefix to query yfinance
+            yf_ticker = col.replace("PX_", "", 1) if col.startswith("PX_") else col
+            # Store it using the ORIGINAL column name so it maps back to the dataframe
+            earnings_dict[col] = fetch_yfinance_earnings(yf_ticker)
+
+    df = _apply_calendar_features(df, original_cols, earnings_dict)
+
+    # 8. Final Clean up
     return df.drop(columns=original_cols).shift(1)

@@ -5,7 +5,7 @@ numpy>=2.2.6
 feature-engine>=1.9.3
 requests-cache>=1.2.1
 scikit-learn>=1.6.1
-wavetrainer>=0.3.17
+wavetrainer>=0.3.22
 tqdm>=4.67.1
 pyvinecopulib>=0.7.5
 fredapi>=0.5.2
@@ -16,3 +16,4 @@ scipy>=1.16.3
 joblib>=1.5.2
 pyarrow>=22.0.0
 alpaca-py>=0.43.2
+setuptools<81.0.0

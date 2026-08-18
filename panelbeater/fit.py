@@ -22,9 +22,10 @@ def fit(
     quantiles: int | None = None,
     flagged_tickers: list[str] | None = None,
     flagged_macros: list[str] | None = None,
+    n_jobs: int = 1,
 ) -> None:
     """Fit the models."""
-    wavetrainer = create_wt()
+    wavetrainer = create_wt(n_jobs=n_jobs)
     # Fit Vine Copula on historical returns
     # We use pct_change to capture the dependency of returns
     returns = df_y.pct_change().dropna()
@@ -32,6 +33,8 @@ def fit(
         returns = returns.to_frame()
     fit_vine_copula(returns)
     df_x = features(df=df_y.copy(), windows=windows, lags=lags)
+    bbwidth_cols_to_drop = [col for col in df_x.columns if "_bbwidth_" in col]
+    df_x = df_x.drop(columns=bbwidth_cols_to_drop)
 
     # --- UPDATED: Pass config down to normalize ---
     df_y_norm = normalize(
