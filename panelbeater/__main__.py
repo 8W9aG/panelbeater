@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from .download import download
 from .fit import fit
 from .simulate import simulate
-from .sync import sync_positions
 from .trades import trades
 
 _TICKERS = [
@@ -55,6 +54,7 @@ _MACROS = [
     "T10YIE",  # 10-Year Breakeven Inflation Rate
     # Indexes
     "^IRX",  # 13 WEEK TREASURY BILL
+    "^N225",  # Nikkei 225
 ]
 _WINDOWS = [
     5,
@@ -73,7 +73,7 @@ _NUM_QUANTILES = 5
 
 # Assets and Macros that will receive the KDE tail treatment
 _FLAGGED_TICKERS: list[str] = []
-_FLAGGED_MACROS: list[str] = []
+_FLAGGED_MACROS: list[str] = ["^N225"]
 
 
 def main() -> None:
@@ -101,14 +101,6 @@ def main() -> None:
         default=False,
         action=argparse.BooleanOptionalAction,
     )
-    parser.add_argument(
-        "--sync",
-        help="Whether to synchronise the trades.",
-        required=False,
-        default=False,
-        action=argparse.BooleanOptionalAction,
-    )
-
     # --- NEW: CLI override for quantiles ---
     parser.add_argument(
         "--quantiles",
@@ -146,9 +138,7 @@ def main() -> None:
         )
 
     if args.trades:
-        df_trades = trades(df_y=df_y, days_out=_DAYS_OUT, tickers=_TICKERS)
-        if args.sync:
-            sync_positions(df_trades)
+        trades(df_y=df_y, days_out=_DAYS_OUT, tickers=_TICKERS)
 
 
 if __name__ == "__main__":

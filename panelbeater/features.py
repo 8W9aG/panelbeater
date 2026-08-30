@@ -1,12 +1,16 @@
 """Generate features over a dataframe."""
 
 # pylint: disable=too-many-locals,broad-exception-caught
+import os
 import warnings
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from feature_engine.datetime import DatetimeFeatures
+
+_FRED_API_ROOT = "https://api.stlouisfed.org/fred"
 
 
 def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
@@ -172,16 +176,72 @@ def fetch_yfinance_earnings(ticker: str, limit: int = 100) -> pd.DatetimeIndex:
         return pd.DatetimeIndex([])
 
 
-def _compute_earnings_distances(
-    target_idx: pd.DatetimeIndex, cal_idx: pd.DatetimeIndex, prefix: str
+def fetch_fred_release_dates(series_code: str, limit: int = 100) -> pd.DatetimeIndex:
+    """
+    Safely fetch a FRED series' release calendar (past and publicly
+    scheduled future release/announcement dates, e.g. CPI or FOMC dates).
+    Returns an empty DatetimeIndex if the series has no associated FRED
+    release (e.g. Yahoo-sourced index macros like ^IRX) or the lookup fails.
+    """
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key or series_code.startswith("^"):
+        return pd.DatetimeIndex([])
+
+    try:
+        release_resp = requests.get(
+            f"{_FRED_API_ROOT}/series/release",
+            params={
+                "series_id": series_code,
+                "api_key": api_key,
+                "file_type": "json",
+            },
+            timeout=10,
+        )
+        release_resp.raise_for_status()
+        releases = release_resp.json().get("releases", [])
+        if not releases:
+            return pd.DatetimeIndex([])
+        release_id = releases[0]["id"]
+
+        dates_resp = requests.get(
+            f"{_FRED_API_ROOT}/release/dates",
+            params={
+                "release_id": release_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "include_release_dates_with_no_data": "true",
+                "limit": limit,
+                "sort_order": "desc",
+            },
+            timeout=10,
+        )
+        dates_resp.raise_for_status()
+        release_dates = dates_resp.json().get("release_dates", [])
+        if not release_dates:
+            return pd.DatetimeIndex([])
+
+        return (
+            pd.to_datetime([d["date"] for d in release_dates]).normalize().sort_values()
+        )
+
+    except Exception:  # noqa
+        # Catch network/parsing errors on unsupported or misconfigured series
+        return pd.DatetimeIndex([])
+
+
+def _compute_calendar_distances(
+    target_idx: pd.DatetimeIndex, cal_idx: pd.DatetimeIndex, prefix: str, label: str
 ) -> pd.DataFrame:
     """
-    Vectorized computation of days since last earnings and days until next earnings.
+    Vectorized computation of days since last and days until next calendar event.
     """
-    # --- Edge Case: Asset has no earnings (e.g., SPY) ---
+    # --- Edge Case: Asset has no calendar events (e.g., SPY earnings, ^IRX releases) ---
     if cal_idx.empty:
         return pd.DataFrame(
-            {f"{prefix}_days_since_earn": np.nan, f"{prefix}_days_until_earn": np.nan},
+            {
+                f"{prefix}_days_since_{label}": np.nan,
+                f"{prefix}_days_until_{label}": np.nan,
+            },
             index=target_idx,
         )
 
@@ -203,24 +263,26 @@ def _compute_earnings_distances(
 
     return pd.DataFrame(
         {
-            f"{prefix}_days_since_earn": days_since,
-            f"{prefix}_days_until_earn": days_until,
+            f"{prefix}_days_since_{label}": days_since,
+            f"{prefix}_days_until_{label}": days_until,
         },
         index=target_idx,
     )
 
 
 def _apply_calendar_features(
-    df: pd.DataFrame, original_cols: list[str], earnings_dict: dict
+    df: pd.DataFrame, original_cols: list[str], cal_dict: dict, label: str
 ) -> pd.DataFrame:
     cal_features = []
 
     for col in original_cols:
-        cal_idx = earnings_dict.get(col, pd.DatetimeIndex([]))
+        cal_idx = cal_dict.get(col, pd.DatetimeIndex([]))
 
-        # Calculate distances (will return NaNs for SPY/empty calendars)
-        earn_df = _compute_earnings_distances(df.index, cal_idx, prefix=col)
-        cal_features.append(earn_df)
+        # Calculate distances (will return NaNs for empty calendars)
+        cal_df = _compute_calendar_distances(
+            pd.DatetimeIndex(df.index), cal_idx, prefix=col, label=label
+        )
+        cal_features.append(cal_df)
 
     if cal_features:
         return pd.concat([df] + cal_features, axis=1)
@@ -251,19 +313,26 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     # 6. Datetime Features
     df = _dt_features(df=df)
 
-    # 7. Dynamically generate the earnings dictionary with namespace filtering
+    # 7. Dynamically generate the earnings and macro-release dictionaries
+    # with namespace filtering
     earnings_dict = {}
+    macro_dict = {}
     for col in original_cols:
         if col.startswith("MACRO_"):
             # Macros do not have corporate earnings
             earnings_dict[col] = pd.DatetimeIndex([])
+            # Strip 'MACRO_' prefix to query the FRED release calendar
+            fred_code = col.replace("MACRO_", "", 1)
+            macro_dict[col] = fetch_fred_release_dates(fred_code)
         else:
             # Strip 'PX_' prefix to query yfinance
             yf_ticker = col.replace("PX_", "", 1) if col.startswith("PX_") else col
             # Store it using the ORIGINAL column name so it maps back to the dataframe
             earnings_dict[col] = fetch_yfinance_earnings(yf_ticker)
+            macro_dict[col] = pd.DatetimeIndex([])
 
-    df = _apply_calendar_features(df, original_cols, earnings_dict)
+    df = _apply_calendar_features(df, original_cols, earnings_dict, label="earn")
+    df = _apply_calendar_features(df, original_cols, macro_dict, label="macro")
 
     # 8. Final Clean up
     return df.drop(columns=original_cols).shift(1)

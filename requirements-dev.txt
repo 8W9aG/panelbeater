@@ -5,6 +5,7 @@ flake8==7.3.0
 pylint==4.0.2
 mypy==1.18.2
 pyright==1.1.407
+pandas-stubs
 pytest==8.4.2
 pytest-drop-dup-tests==1.0.0
 pytest-sugar==1.1.1

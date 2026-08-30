@@ -16,7 +16,7 @@ from .sizing import (apply_merton_jumps, calculate_distribution_exits,
 def calculate_model_volatility(wide_df: pd.DataFrame, days_per_year=365) -> float:
     """Calculates annualized volatility from path matrix."""
     # Standard deviation of log returns across all paths
-    log_rets = np.log(wide_df / wide_df.shift(1)).dropna()
+    log_rets = pd.DataFrame(np.log(wide_df / wide_df.shift(1))).dropna()
     daily_vol = log_rets.std().mean()  # Average std across all simulation columns
     return daily_vol * np.sqrt(days_per_year)
 

@@ -1,7 +1,10 @@
 """Handle generating trades."""
 
 # pylint: disable=use-dict-literal,line-too-long,no-else-return
+from typing import cast
+
 import pandas as pd
+import plotly.graph_objects as go
 import tqdm
 
 from .options import (determine_spot_position_and_save,
@@ -18,10 +21,15 @@ def trades(df_y: pd.DataFrame, days_out: int, tickers: list[str]) -> pd.DataFram
             continue
         plot_df = df_mc.pivot(columns=SIMULATION_COLUMN, values=col).tail(days_out + 1)
         # Plotting
-        fig = plot_df.plot(
-            title=f"Monte Carlo Simulation: {col}",
-            labels={"value": "Price", "index": "Date", "simulation": "Path ID"},
-            template="plotly_dark",
+        # pandas-stubs types .plot() as returning a matplotlib Axes, but with
+        # the plotly backend set above it actually returns a plotly Figure.
+        fig = cast(
+            go.Figure,
+            plot_df.plot(
+                title=f"Monte Carlo Simulation: {col}",
+                labels={"value": "Price", "index": "Date", "simulation": "Path ID"},
+                template="plotly_dark",
+            ),
         )
 
         # 2. KEY FIX: Dim the simulation lines immediately

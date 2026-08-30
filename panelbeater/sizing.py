@@ -123,7 +123,9 @@ def calculate_distribution_exits(row, sim_df, horizon_pct=0.5):
     else:
         try:
             target_lookup = pd.to_datetime(date_val)
-            idx_loc = sim_df.index.get_indexer([target_lookup], method="nearest")[0]
+            idx_loc = sim_df.index.get_indexer(
+                pd.Index([target_lookup]), method="nearest"
+            )[0]
             sim_prices = sim_df.iloc[idx_loc].values
         except Exception:
             return row["ask"], row["ask"]

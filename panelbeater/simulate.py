@@ -19,19 +19,29 @@ SIMULATION_FILENAME = "sims.parquet"
 
 
 def precompute_kdes(df_y: pd.DataFrame, quantiles: int) -> dict:
-    """Precomputes KDEs for all quantiles across all assets."""
+    """Precomputes KDEs for all quantiles across all assets.
+
+    Bucket boundaries are derived from the trailing 365-day return window,
+    matching the rolling-window bucket definition normalize() uses to label
+    training targets (see normalizer.py). Using the static full-history
+    quantile instead would define "quantile q" differently at training time
+    than at sampling time, causing samples to be drawn from the wrong bucket
+    whenever the recent volatility regime differs from the full-history one.
+    """
     kdes: dict[str, dict[int, dict[str, Any] | None]] = {}
     for col in df_y.columns:
         # Get the full historical percentage changes
         returns = df_y[col].pct_change().dropna()
+        # Bucket boundaries reflect the current (most recent) regime
+        recent_returns = returns.iloc[-365:]
         kdes[col] = {}
 
         for q in range(quantiles):
             lower_pctile = q / quantiles
             upper_pctile = (q + 1) / quantiles
 
-            lower_bound = returns.quantile(lower_pctile)
-            upper_bound = returns.quantile(upper_pctile)
+            lower_bound = recent_returns.quantile(lower_pctile)
+            upper_bound = recent_returns.quantile(upper_pctile)
 
             # Slice the data for this specific quantile
             if q == 0:
