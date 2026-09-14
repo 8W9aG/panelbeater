@@ -24,6 +24,7 @@ _TICKERS = [
     "SMH",  # VanEck Semiconductor ETF
     "VNQ",  # Vanguard Real Estate Index Fund ETF
     "QCOM",  # QUALCOMM Incorporated
+    "BDRY",  # Breakwave Dry Bulk Shipping ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
@@ -72,7 +73,7 @@ _SIMS = 1000
 _NUM_QUANTILES = 5
 
 # Assets and Macros that will receive the KDE tail treatment
-_FLAGGED_TICKERS: list[str] = []
+_FLAGGED_TICKERS: list[str] = ["BDRY"]
 _FLAGGED_MACROS: list[str] = ["^N225"]
 
 
@@ -124,7 +125,7 @@ def main() -> None:
             quantiles=args.quantiles,
             flagged_tickers=_FLAGGED_TICKERS,
             flagged_macros=_FLAGGED_MACROS,
-            n_jobs=2,
+            n_jobs=4,
         )
 
     if args.inference:

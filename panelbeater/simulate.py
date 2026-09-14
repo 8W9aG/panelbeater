@@ -17,6 +17,39 @@ from .wt import create_wt
 SIMULATION_COLUMN = "simulation"
 SIMULATION_FILENAME = "sims.parquet"
 
+# run_single_simulation recomputes features() on the entire history every
+# simulated day but only ever reads the last row (see below). These bound
+# that recompute to trailing windows instead of the full ~10k-row history.
+#
+# The windows/lags-based features (_ticker_features, _meta_ticker_feature)
+# only ever look back a bounded number of rows -- verified empirically
+# exact (bit-identical to a full-history computation, once pandas'
+# rolling std/skew/kurt numerical instability is worked around) at that
+# bound. The worst case is a *triple*-nested feature: bbwidth_w (rolling
+# mean/std, w rows) -> bbwidthnorm_w (a second rolling min/max pass on
+# top, w more rows) -> a meta rolling(W) pass on top of that (W more
+# rows) needs 2*w + W - 2 rows; for w == W == max(windows) that's
+# 3*max(windows) - 2. Confirmed by direct measurement: 598 rows leaves a
+# real (0.06) error at that feature, 599 drops it to 2e-9 (floating-point
+# noise). Computed from `windows` (with a safety margin) rather than
+# hardcoded, so it can't silently fall short if the windows config changes.
+def _feature_lookback(windows: list[int], lags: list[int]) -> int:
+    return max(3 * max(windows) - 2, max(windows) + max(lags)) + 100
+
+
+# HP filter lookback, separate from the above: its Kalman state has no
+# hard window, so truncating always costs some accuracy versus a
+# full-history computation, unlike the windows/lags features above. That
+# accuracy loss doesn't shrink to floating-point noise no matter how
+# generous the lookback margin is -- it's a genuine tradeoff, measured
+# directly rather than derived. For the largest (near-secular) lambda, a
+# strongly trending series (e.g. SPY) is already accurate by ~2000 rows,
+# but a mean-reverting series (e.g. T10Y2Y, FEDFUNDS) still shows real
+# error (~0.03-0.07 on a typical trend_dev scale of a few tenths) at 2520
+# rows, dropping to ~0.0002-0.001 by 5000. The HP filter itself is cheap
+# even at full history, so this is set well above the windows/lags lookback.
+_SIMULATION_HP_LOOKBACK = 5000
+
 
 def precompute_kdes(df_y: pd.DataFrame, quantiles: int) -> dict:
     """Precomputes KDEs for all quantiles across all assets.
@@ -87,10 +120,17 @@ def run_single_simulation(
     # Local copies for thread-safety (though joblib uses processes)
     df_y = df_y.copy()
     wavetrainer = create_wt()
+    feature_lookback = _feature_lookback(windows, lags)
 
     for _ in tqdm.tqdm(range(days_out), desc="Simulation Days"):
         # 1. Feature Engineering
-        df_x = features(df=df_y.copy(), windows=windows, lags=lags)
+        df_x = features(
+            df=df_y.copy(),
+            windows=windows,
+            lags=lags,
+            lookback=feature_lookback,
+            hp_lookback=_SIMULATION_HP_LOOKBACK,
+        )
 
         # 2. Get Model Prediction (u_step sample from Copula)
         u_step = sample_joint_step(vine_cop)

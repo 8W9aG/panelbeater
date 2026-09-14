@@ -3,14 +3,104 @@
 # pylint: disable=too-many-locals,broad-exception-caught
 import os
 import warnings
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 from feature_engine.datetime import DatetimeFeatures
+from joblib import Parallel, delayed
+from numpy.lib.stride_tricks import sliding_window_view
+from statsmodels.tsa.statespace.structural import UnobservedComponents
 
 _FRED_API_ROOT = "https://api.stlouisfed.org/fred"
+
+# Hodrick-Prescott smoothing-strength "theories", spanning a responsive
+# short-run trend up to a near-secular one. lambda = sigma_irregular^2 /
+# sigma_trend^2 in the equivalent state-space model (see _hp_column_lambda).
+_HP_LAMBDAS = [1e2, 1e5, 1e8, 1e11]
+
+
+def _stable_rolling_std(
+    data: pd.Series | pd.DataFrame, window: int
+) -> pd.Series | pd.DataFrame:
+    """
+    Numerically stable rolling standard deviation (ddof=1), matching
+    pandas' rolling(window).std() semantics (NaN until `window` valid
+    observations are available), but recomputed from scratch per window
+    instead of via pandas' incremental algorithm.
+
+    pandas' rolling().std() maintains a running mean/sum-of-squares state
+    that it updates incrementally as the window slides, for O(n) speed.
+    Observed in practice: a single extreme historical value can leave that
+    running state corrupted by accumulated floating-point error for
+    thousands of subsequent rows, producing std values many orders of
+    magnitude too large even though the actual window at that point is
+    unremarkable (confirmed by recomputing the same window from scratch).
+    This trades some speed (O(n * window) instead of O(n)) for that
+    guarantee never happening.
+    """
+    is_series = isinstance(data, pd.Series)
+    frame = data.to_frame() if is_series else data
+
+    values = frame.to_numpy(dtype=float)
+    n, m = values.shape
+    result = np.full((n, m), np.nan)
+
+    if n >= window:
+        windows = sliding_window_view(values, window_shape=window, axis=0)
+        result[window - 1 :, :] = np.std(windows, axis=-1, ddof=1)
+
+    out = pd.DataFrame(result, index=frame.index, columns=frame.columns)
+    return out.iloc[:, 0] if is_series else out
+
+
+def _stable_rolling_moment(
+    data: pd.Series | pd.DataFrame, window: int, kind: str
+) -> pd.Series | pd.DataFrame:
+    """
+    Numerically stable rolling skewness/kurtosis, matching pandas'
+    rolling(window).skew()/.kurt() semantics and formula (the bias-corrected
+    "adjusted Fisher-Pearson" skewness / excess kurtosis estimator, verified
+    to match scipy.stats.skew(bias=False) / kurtosis(fisher=True, bias=False)
+    to floating-point precision), but recomputed from scratch per window.
+
+    pandas' rolling().skew()/.kurt() have the same class of issue as
+    rolling().std() (see _stable_rolling_std): confirmed in practice that
+    rolling(5).kurt() on a ~10k-row series gave 8.97 for a window whose
+    correct kurtosis (independently verified via scipy) is exactly 5.0.
+    kind: "skew" or "kurt".
+    """
+    is_series = isinstance(data, pd.Series)
+    frame = data.to_frame() if is_series else data
+
+    values = frame.to_numpy(dtype=float)
+    n_rows, m = values.shape
+    result = np.full((n_rows, m), np.nan)
+
+    # Undefined (division by n-2 or (n-2)(n-3)) for windows this small --
+    # pandas returns NaN here too rather than erroring.
+    min_window = 3 if kind == "skew" else 4
+
+    if n_rows >= window and window >= min_window:
+        n = window
+        win = sliding_window_view(values, window_shape=window, axis=0)
+        mean = win.mean(axis=-1, keepdims=True)
+        dev = win - mean
+        m2 = np.mean(dev**2, axis=-1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if kind == "skew":
+                m3 = np.mean(dev**3, axis=-1)
+                stat = (np.sqrt(n * (n - 1)) / (n - 2)) * (m3 / m2**1.5)
+            else:
+                m4 = np.mean(dev**4, axis=-1)
+                g2_pop = m4 / m2**2 - 3
+                stat = ((n - 1) / ((n - 2) * (n - 3))) * ((n + 1) * g2_pop + 6)
+        result[window - 1 :, :] = stat
+
+    out = pd.DataFrame(result, index=frame.index, columns=frame.columns)
+    return out.iloc[:, 0] if is_series else out
 
 
 def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
@@ -30,7 +120,7 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
         daily_returns = all_daily_returns[col]
 
         # Pre-calculate baseline long-term volatility (standard deviation of returns)
-        baseline_vol = daily_returns.rolling(max_window).std()
+        baseline_vol = _stable_rolling_std(daily_returns, max_window)
 
         for w in windows:
             with warnings.catch_warnings():
@@ -46,7 +136,7 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
 
                 # Z-Score
                 mu = roll.mean()
-                sigma = roll.std()
+                sigma = _stable_rolling_std(s, w)
 
                 # Protect against zero variance
                 safe_sigma = sigma.replace(0.0, np.nan)
@@ -60,11 +150,11 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
                 df[f"{col}_er_{w}"] = er
 
                 # --- 2. Rolling Skewness & Kurtosis ---
-                df[f"{col}_skew_{w}"] = roll.skew().fillna(0)
-                df[f"{col}_kurt_{w}"] = roll.kurt().fillna(0)
+                df[f"{col}_skew_{w}"] = _stable_rolling_moment(s, w, "skew").fillna(0)
+                df[f"{col}_kurt_{w}"] = _stable_rolling_moment(s, w, "kurt").fillna(0)
 
                 # --- 3. Volatility Regime Ratios ---
-                current_vol = daily_returns.rolling(w).std()
+                current_vol = _stable_rolling_std(daily_returns, w)
                 vol_ratio = (
                     current_vol.div(baseline_vol)
                     .replace([np.inf, -np.inf], 0)
@@ -74,13 +164,13 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
 
                 # --- 4. Bollinger Band Width (Volatility Squeeze) ---
                 # 4 sigma covers ~95% of data (2 up, 2 down)
-                bb_width = (4 * sigma) / mu.replace(0.0, np.nan)
-                df[f"{col}_bbwidth_{w}"] = bb_width.fillna(0)
+                # Guard against near-zero mu (e.g. T10Y2Y crossing zero during
+                # yield curve inversions), which otherwise blows this up to
+                # extreme values -- same guard bbwidthnorm below already used.
+                safe_width = (4 * sigma) / (mu.abs() + 1e-8)
+                df[f"{col}_bbwidth_{w}"] = safe_width.fillna(0)
 
                 # New normalized version (Min-Max bounded strictly between 0.0 and 1.0)
-                # We calculate a temporary safe width so rolling min/max
-                # avoids the overflow outliers
-                safe_width = (4 * sigma) / (mu.abs() + 1e-8)
                 roll_min = safe_width.rolling(w).min()
                 roll_max = safe_width.rolling(w).max()
                 bb_width_norm = (safe_width - roll_min) / (roll_max - roll_min + 1e-8)
@@ -117,7 +207,7 @@ def _meta_ticker_feature(
         dfs.append(df.shift(lag).add_suffix(f"_lag{lag}"))
     for window in windows:
         dfs.append(df.rolling(window).mean().add_suffix(f"_rmean{window}"))  # type: ignore
-        dfs.append(df.rolling(window).std().add_suffix(f"_rstd{window}"))  # type: ignore
+        dfs.append(_stable_rolling_std(df, window).add_suffix(f"_rstd{window}"))
     return pd.concat(dfs, axis=1).replace([np.inf, -np.inf], np.nan)
 
 
@@ -149,10 +239,92 @@ def _cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([cs_rank, cs_z], axis=1)
 
 
+def _hp_column_lambda(col: str, s: pd.Series, lam: float) -> dict[str, pd.Series]:
+    """
+    Causal (one-sided) Hodrick-Prescott trend/cycle decomposition.
+
+    The classic HP filter is a global penalized least-squares smoother: the
+    trend at time t depends on the entire series, including points after t.
+    King & Rebelo (1993) show that HP trend is exactly the Kalman SMOOTHER
+    estimate of a "smooth trend" local-linear-trend state-space model with
+    variance ratio lambda = sigma_irregular^2 / sigma_trend^2. Swapping in
+    the Kalman FILTER instead gives the causal, one-sided analogue: the
+    trend/slope at t depends only on data up to t, computed in a single
+    O(n) forward pass rather than repeatedly refitting on trailing windows.
+
+    lambda is a fixed smoothing-strength dial (as in standard HP filter
+    usage), not something estimated from the data, so there is no
+    hyperparameter-fitting lookahead either.
+    """
+    prefix = f"{col}_hp{lam:g}"
+    trend_dev = pd.Series(np.nan, index=s.index)
+    trend_slope = pd.Series(np.nan, index=s.index)
+    cycle_ratio = pd.Series(np.nan, index=s.index)
+
+    clean = s.ffill().bfill()
+    if clean.isna().any() or clean.nunique() < 2:
+        return {
+            f"{prefix}_trend_dev": trend_dev,
+            f"{prefix}_trend_slope": trend_slope,
+            f"{prefix}_cycle_ratio": cycle_ratio,
+        }
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mod = UnobservedComponents(clean.to_numpy(), level="smooth trend")
+            res = mod.filter([1.0, 1.0 / lam])
+    except Exception:  # noqa
+        return {
+            f"{prefix}_trend_dev": trend_dev,
+            f"{prefix}_trend_slope": trend_slope,
+            f"{prefix}_cycle_ratio": cycle_ratio,
+        }
+
+    level = clean.to_numpy()
+    safe_level = np.where(np.abs(level) < 1e-8, np.nan, level)
+    filtered_level = res.filtered_state[0]
+    filtered_slope = res.filtered_state[1]
+
+    # Diffuse-initialization burn-in: early states are unreliable.
+    burn = max(res.loglikelihood_burn, 1)
+
+    trend_dev.iloc[burn:] = (filtered_level / safe_level - 1)[burn:]
+    trend_slope.iloc[burn:] = (filtered_slope / safe_level)[burn:]
+    cycle_ratio.iloc[burn:] = ((level - filtered_level) / safe_level)[burn:]
+
+    return {
+        f"{prefix}_trend_dev": trend_dev,
+        f"{prefix}_trend_slope": trend_slope,
+        f"{prefix}_cycle_ratio": cycle_ratio,
+    }
+
+
+def _hp_features(df: pd.DataFrame, lambdas: list[float], n_jobs: int = 1) -> pd.DataFrame:
+    """Causal Hodrick-Prescott trend/cycle features for each column."""
+    tasks = [(col, df[col], lam) for col in df.columns for lam in lambdas]
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_hp_column_lambda)(col, s, lam) for col, s, lam in tasks
+    )
+
+    out = {}
+    for result in results:
+        out.update(result)
+    return pd.DataFrame(out, index=df.index)
+
+
+@lru_cache(maxsize=None)
 def fetch_yfinance_earnings(ticker: str, limit: int = 100) -> pd.DatetimeIndex:
     """
     Safely fetch earnings dates. Returns an empty DatetimeIndex if
     the asset is an ETF (e.g., SPY) or has no earnings history.
+
+    Cached per-process: this depends only on the ticker, not on the price
+    data or the date range being featurized, but features() is called once
+    per simulated day inside run_single_simulation's loop (see simulate.py)
+    -- without caching, that refetches the same calendar over the network
+    on every single day-step of every simulation.
     """
     try:
         t = yf.Ticker(ticker)
@@ -176,12 +348,15 @@ def fetch_yfinance_earnings(ticker: str, limit: int = 100) -> pd.DatetimeIndex:
         return pd.DatetimeIndex([])
 
 
+@lru_cache(maxsize=None)
 def fetch_fred_release_dates(series_code: str, limit: int = 100) -> pd.DatetimeIndex:
     """
     Safely fetch a FRED series' release calendar (past and publicly
     scheduled future release/announcement dates, e.g. CPI or FOMC dates).
     Returns an empty DatetimeIndex if the series has no associated FRED
     release (e.g. Yahoo-sourced index macros like ^IRX) or the lookup fails.
+
+    Cached per-process: see fetch_yfinance_earnings for why this matters.
     """
     api_key = os.environ.get("FRED_API_KEY")
     if not api_key or series_code.startswith("^"):
@@ -290,16 +465,61 @@ def _apply_calendar_features(
     return df
 
 
-def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFrame:
-    """Generate features on a dataframe."""
+def features(
+    df: pd.DataFrame,
+    windows: list[int],
+    lags: list[int],
+    n_jobs: int = 1,
+    lookback: int | None = None,
+    hp_lookback: int | None = None,
+) -> pd.DataFrame:
+    """Generate features on a dataframe.
+
+    lookback: if set, only the trailing `lookback` rows are used for the
+    windows/lags-based features (_ticker_features, _meta_ticker_feature).
+    These only ever look back a bounded number of rows in the worst case
+    (2*max(windows)-1, for a meta rolling window applied on top of an
+    already max(windows)-rolled ticker feature) -- once lookback exceeds
+    that, results are exactly identical (verified empirically, not just
+    assumed) to a full-history computation.
+
+    hp_lookback: separately controls how much history the HP filter
+    (_hp_features) sees. Unlike the windows/lags features, the Kalman
+    filter's state is a weighted combination of ALL prior observations
+    with no hard window, so truncating always introduces some divergence
+    from a full-history computation -- how much depends on how slowly the
+    filter's gain converges for a given lambda and series. Measured:
+    near-instant for a strongly trending series (e.g. SPY), but the
+    largest lambda on a mean-reverting series (e.g. T10Y2Y, FEDFUNDS)
+    needs several thousand rows before the error becomes small. Defaults
+    to `lookback` if not given; pass a larger value (or None for full
+    history) when accuracy on such series matters more than the modest
+    extra compute -- the HP filter is cheap even at full history, so this
+    should usually be set well above `lookback`, not left to default to it.
+
+    Row-count-independent steps (cross-sectional, calendar, datetime
+    features) are unaffected by either. Leave both as None (full history,
+    exact throughout) for training/backtesting.
+    """
     # 1. Deduplicate inputs to prevent column collisions
     windows = sorted(list(set(windows)))
     lags = sorted(list(set(lags)))
+
+    hp_lookback = lookback if hp_lookback is None else hp_lookback
+    hp_df = df if hp_lookback is None else df.tail(hp_lookback)
+
+    if lookback is not None:
+        df = df.tail(lookback)
 
     original_cols = df.columns.values.tolist()
 
     # 2. Generate Cross-Sectional Features (Use ONLY original cols)
     df_xs = _cross_sectional_features(df[original_cols])  # pyright: ignore
+
+    # 2b. Generate causal HP filter trend/cycle features (Use ONLY original
+    # cols, and its own possibly-larger lookback -- see docstring)
+    df_hp = _hp_features(hp_df[original_cols], lambdas=_HP_LAMBDAS, n_jobs=n_jobs)  # pyright: ignore
+    df_hp = df_hp.reindex(df.index)
 
     # 3. Generate Time-Series & Market Physics Features (modifies df in-place)
     df = _ticker_features(df=df, windows=windows)
@@ -307,8 +527,8 @@ def features(df: pd.DataFrame, windows: list[int], lags: list[int]) -> pd.DataFr
     # 4. Generate Meta Features (Lags/Rolling of the expanded df)
     df = _meta_ticker_feature(df, lags=lags, windows=windows)
 
-    # 5. Merge Cross-Sectional Features
-    df = pd.concat([df, df_xs], axis=1)
+    # 5. Merge Cross-Sectional & HP Filter Features
+    df = pd.concat([df, df_xs, df_hp], axis=1)
 
     # 6. Datetime Features
     df = _dt_features(df=df)

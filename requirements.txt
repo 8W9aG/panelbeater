@@ -13,6 +13,7 @@ python-dotenv>=1.1.0
 kaleido>=1.2.0
 plotly>=6.3.1
 scipy>=1.16.3
+statsmodels>=0.14.5
 joblib>=1.5.2
 pyarrow>=22.0.0
 setuptools<81.0.0

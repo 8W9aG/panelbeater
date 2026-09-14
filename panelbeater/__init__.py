@@ -6,7 +6,7 @@ from .simulate import SIMULATION_FILENAME, run_single_simulation, simulate
 from .trades import process_and_classify_trades, trades
 from .wt import create_wt
 
-__VERSION__ = "0.2.70"
+__VERSION__ = "0.2.71"
 __all__ = [
     "download",
     "fit",
