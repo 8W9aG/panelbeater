@@ -4,6 +4,7 @@
 import os
 import warnings
 from functools import lru_cache
+from typing import overload
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,14 @@ _FRED_API_ROOT = "https://api.stlouisfed.org/fred"
 # short-run trend up to a near-secular one. lambda = sigma_irregular^2 /
 # sigma_trend^2 in the equivalent state-space model (see _hp_column_lambda).
 _HP_LAMBDAS = [1e2, 1e5, 1e8, 1e11]
+
+
+@overload
+def _stable_rolling_std(data: pd.Series, window: int) -> pd.Series: ...
+
+
+@overload
+def _stable_rolling_std(data: pd.DataFrame, window: int) -> pd.DataFrame: ...
 
 
 def _stable_rolling_std(
@@ -42,10 +51,10 @@ def _stable_rolling_std(
     guarantee never happening.
     """
     is_series = isinstance(data, pd.Series)
-    frame = data.to_frame() if is_series else data
+    frame = data.to_frame() if isinstance(data, pd.Series) else data
 
     values = frame.to_numpy(dtype=float)
-    n, m = values.shape
+    n, m = values.shape[0], values.shape[1]
     result = np.full((n, m), np.nan)
 
     if n >= window:
@@ -54,6 +63,16 @@ def _stable_rolling_std(
 
     out = pd.DataFrame(result, index=frame.index, columns=frame.columns)
     return out.iloc[:, 0] if is_series else out
+
+
+@overload
+def _stable_rolling_moment(data: pd.Series, window: int, kind: str) -> pd.Series: ...
+
+
+@overload
+def _stable_rolling_moment(
+    data: pd.DataFrame, window: int, kind: str
+) -> pd.DataFrame: ...
 
 
 def _stable_rolling_moment(
@@ -73,17 +92,17 @@ def _stable_rolling_moment(
     kind: "skew" or "kurt".
     """
     is_series = isinstance(data, pd.Series)
-    frame = data.to_frame() if is_series else data
+    frame = data.to_frame() if isinstance(data, pd.Series) else data
 
     values = frame.to_numpy(dtype=float)
-    n_rows, m = values.shape
+    n_rows, m = values.shape[0], values.shape[1]
     result = np.full((n_rows, m), np.nan)
 
     # Undefined (division by n-2 or (n-2)(n-3)) for windows this small --
     # pandas returns NaN here too rather than erroring.
     min_window = 3 if kind == "skew" else 4
 
-    if n_rows >= window and window >= min_window:
+    if n_rows >= window >= min_window:
         n = window
         win = sliding_window_view(values, window_shape=window, axis=0)
         mean = win.mean(axis=-1, keepdims=True)
@@ -101,6 +120,40 @@ def _stable_rolling_moment(
 
     out = pd.DataFrame(result, index=frame.index, columns=frame.columns)
     return out.iloc[:, 0] if is_series else out
+
+
+def _macd_features(s: pd.Series, sigma: pd.Series, w: int) -> dict[str, pd.Series]:
+    """MACD line, signal and histogram for one series at window `w`.
+
+    Treat w as the "slow" EMA period; fast/signal periods approximate the
+    classic 12/26/9 ratios (fast ~= 0.46*slow, signal ~= 0.35*slow) so each
+    configured window gets its own fast/slow/signal MACD, consistent with how
+    every other feature here is parameterized by `w`. EMAs are inherently
+    causal (recursive, only ever see past + current data).
+
+    Returns the three series keyed by column suffix.
+    """
+    fast_span = max(2, w // 2)
+    signal_span = max(2, w // 3)
+    ema_fast = s.ewm(span=fast_span, adjust=False).mean()
+    ema_slow = s.ewm(span=w, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_span, adjust=False).mean()
+    macd_hist = macd_line - signal_line
+
+    # Normalize by price level (guard near-zero denominators -- e.g. spread
+    # macros like T10Y2Y crossing zero). A bare `s.abs() + 1e-8` epsilon isn't
+    # enough here -- confirmed the same failure bbwidth originally had: T10Y2Y
+    # flattened to near-zero during its 2022 inversion and blew this up to
+    # 1.7e7. `sigma` (the series' own rolling std) is automatically
+    # scale-matched -- negligible next to `s` for a normal price series, but a
+    # meaningful floor when `s` itself approaches zero.
+    safe_s = s.abs() + sigma.abs() + 1e-8
+    return {
+        "macd": (macd_line / safe_s).fillna(0),
+        "macdsignal": (signal_line / safe_s).fillna(0),
+        "macdhist": (macd_hist / safe_s).fillna(0),
+    }
 
 
 def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
@@ -196,6 +249,10 @@ def _ticker_features(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
                 beta_proxy = daily_returns.rolling(w).corr(market_index)  # type: ignore
                 df[f"{col}_beta_{w}"] = beta_proxy.fillna(0)
 
+                # --- 8. MACD (Moving Average Convergence Divergence) ---
+                for suffix, macd_series in _macd_features(s, sigma, w).items():
+                    df[f"{col}_{suffix}_{w}"] = macd_series
+
     return df
 
 
@@ -272,7 +329,10 @@ def _hp_column_lambda(col: str, s: pd.Series, lam: float) -> dict[str, pd.Series
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            mod = UnobservedComponents(clean.to_numpy(), level="smooth trend")
+            mod = UnobservedComponents(
+                clean.to_numpy(),
+                level="smooth trend",  # pyright: ignore[reportArgumentType]
+            )
             res = mod.filter([1.0, 1.0 / lam])
     except Exception:  # noqa
         return {
@@ -308,9 +368,10 @@ def _hp_features(df: pd.DataFrame, lambdas: list[float], n_jobs: int = 1) -> pd.
         delayed(_hp_column_lambda)(col, s, lam) for col, s, lam in tasks
     )
 
-    out = {}
+    out: dict[str, pd.Series] = {}
     for result in results:
-        out.update(result)
+        if result:
+            out.update(result)
     return pd.DataFrame(out, index=df.index)
 
 
@@ -465,7 +526,7 @@ def _apply_calendar_features(
     return df
 
 
-def features(
+def features(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     df: pd.DataFrame,
     windows: list[int],
     lags: list[int],
@@ -518,7 +579,9 @@ def features(
 
     # 2b. Generate causal HP filter trend/cycle features (Use ONLY original
     # cols, and its own possibly-larger lookback -- see docstring)
-    df_hp = _hp_features(hp_df[original_cols], lambdas=_HP_LAMBDAS, n_jobs=n_jobs)  # pyright: ignore
+    df_hp = _hp_features(  # pyright: ignore
+        hp_df[original_cols], lambdas=_HP_LAMBDAS, n_jobs=n_jobs
+    )
     df_hp = df_hp.reindex(df.index)
 
     # 3. Generate Time-Series & Market Physics Features (modifies df in-place)

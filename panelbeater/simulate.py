@@ -17,6 +17,7 @@ from .wt import create_wt
 SIMULATION_COLUMN = "simulation"
 SIMULATION_FILENAME = "sims.parquet"
 
+
 # run_single_simulation recomputes features() on the entire history every
 # simulated day but only ever reads the last row (see below). These bound
 # that recompute to trailing windows instead of the full ~10k-row history.
@@ -25,16 +26,34 @@ SIMULATION_FILENAME = "sims.parquet"
 # only ever look back a bounded number of rows -- verified empirically
 # exact (bit-identical to a full-history computation, once pandas'
 # rolling std/skew/kurt numerical instability is worked around) at that
-# bound. The worst case is a *triple*-nested feature: bbwidth_w (rolling
-# mean/std, w rows) -> bbwidthnorm_w (a second rolling min/max pass on
-# top, w more rows) -> a meta rolling(W) pass on top of that (W more
-# rows) needs 2*w + W - 2 rows; for w == W == max(windows) that's
-# 3*max(windows) - 2. Confirmed by direct measurement: 598 rows leaves a
-# real (0.06) error at that feature, 599 drops it to 2e-9 (floating-point
-# noise). Computed from `windows` (with a safety margin) rather than
+# bound. The worst case among the strictly-windowed features is a
+# *triple*-nested one: bbwidth_w (rolling mean/std, w rows) ->
+# bbwidthnorm_w (a second rolling min/max pass on top, w more rows) -> a
+# meta rolling(W) pass on top of that (W more rows) needs 2*w + W - 2
+# rows; for w == W == max(windows) that's 3*max(windows) - 2. Confirmed
+# by direct measurement: 598 rows leaves a real (0.06) error at that
+# feature, 599 drops it to 2e-9 (floating-point noise).
+#
+# MACD is different: its EMAs have unbounded (exponentially-decaying)
+# memory like the HP filter's Kalman state, not a hard window, so it
+# never becomes exactly bit-identical no matter the lookback -- but it
+# converges much faster than the HP filter does. Measured: at the
+# windows-only bound above (698), MACD_200 (the slowest configured EMA)
+# still showed a real ~0.0008 error on a slow-converging series
+# (T10Y2Y), shrinking to floating-point noise by ~1500-2000 rows (~10x
+# the slow EMA's span) -- hence the 10*max(windows) term below.
+#
+# Computed from `windows`/`lags` (with a safety margin) rather than
 # hardcoded, so it can't silently fall short if the windows config changes.
 def _feature_lookback(windows: list[int], lags: list[int]) -> int:
-    return max(3 * max(windows) - 2, max(windows) + max(lags)) + 100
+    return (
+        max(
+            3 * max(windows) - 2,
+            max(windows) + max(lags),
+            10 * max(windows),
+        )
+        + 100
+    )
 
 
 # HP filter lookback, separate from the above: its Kalman state has no
@@ -77,15 +96,17 @@ def precompute_kdes(df_y: pd.DataFrame, quantiles: int) -> dict:
             upper_bound = recent_returns.quantile(upper_pctile)
 
             # Slice the data for this specific quantile
+            min_valid: float
+            max_valid: float
             if q == 0:
                 q_data = returns[returns <= upper_bound]
-                min_valid, max_valid = -1.0, upper_bound
+                min_valid, max_valid = -1.0, float(upper_bound)
             elif q == quantiles - 1:
                 q_data = returns[returns >= lower_bound]
-                min_valid, max_valid = lower_bound, float("inf")
+                min_valid, max_valid = float(lower_bound), float("inf")
             else:
                 q_data = returns[(returns >= lower_bound) & (returns <= upper_bound)]
-                min_valid, max_valid = lower_bound, upper_bound
+                min_valid, max_valid = float(lower_bound), float(upper_bound)
 
             # Fit the KDE if there is enough variance
             if len(q_data) > 1 and q_data.std() > 0:

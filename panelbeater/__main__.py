@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from .download import download
 from .fit import fit
 from .simulate import simulate
-from .trades import trades
 
 _TICKERS = [
     # Equities
@@ -25,6 +24,7 @@ _TICKERS = [
     "VNQ",  # Vanguard Real Estate Index Fund ETF
     "QCOM",  # QUALCOMM Incorporated
     "BDRY",  # Breakwave Dry Bulk Shipping ETF
+    "SPHD",  # Invesco S&P 500 High Dividend Low Volatility ETF
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
@@ -73,8 +73,8 @@ _SIMS = 1000
 _NUM_QUANTILES = 5
 
 # Assets and Macros that will receive the KDE tail treatment
-_FLAGGED_TICKERS: list[str] = ["BDRY"]
-_FLAGGED_MACROS: list[str] = ["^N225"]
+_FLAGGED_TICKERS: list[str] = ["BDRY", "SPHD"]
+_FLAGGED_MACROS: list[str] = ["^N225", "T10Y2Y"]
 
 
 def main() -> None:
@@ -93,13 +93,6 @@ def main() -> None:
         help="Whether to do training.",
         required=False,
         default=True,
-        action=argparse.BooleanOptionalAction,
-    )
-    parser.add_argument(
-        "--trades",
-        help="Whether to generate trades.",
-        required=False,
-        default=False,
         action=argparse.BooleanOptionalAction,
     )
     # --- NEW: CLI override for quantiles ---
@@ -137,9 +130,6 @@ def main() -> None:
             lags=_LAGS,
             quantiles=args.quantiles,
         )
-
-    if args.trades:
-        trades(df_y=df_y, days_out=_DAYS_OUT, tickers=_TICKERS)
 
 
 if __name__ == "__main__":
