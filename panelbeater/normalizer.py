@@ -3,11 +3,14 @@
 # pylint: disable=too-many-locals,line-too-long,too-many-statements,too-many-branches
 import math
 import warnings
+from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 from pandas.errors import PerformanceWarning
 from wavetrainer.model.model import PROBABILITY_COLUMN_PREFIX
+
+from .copula import uniforms_by_column
 
 
 def _is_float(s: str) -> bool:
@@ -91,14 +94,21 @@ def normalize(
     return pd.concat(dfs, axis=1)
 
 
-def denormalize(
+def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     df: pd.DataFrame,
     y: pd.DataFrame,
-    u_sample: np.ndarray | None = None,
+    u_sample: np.ndarray | pd.Series | Mapping[str, float] | None = None,
     quantiles: int | None = None,
     precomputed_kdes: dict | None = None,
+    u_columns: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """Denormalize the dataframe back to a total value."""
+    """Denormalize the dataframe back to a total value.
+
+    `u_sample` carries the copula's joint uniforms. It must identify which
+    series each uniform belongs to, either as a pd.Series/mapping keyed by
+    series name (see `copula.VineFit.sample`) or as an array paired with
+    `u_columns`. Series with no uniform are sampled independently.
+    """
     df = df.reindex(y.index)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=PerformanceWarning)
@@ -107,8 +117,22 @@ def denormalize(
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())
-    target_cols = {"_".join(x.split("_")[:2]) for x in cols}
-    asset_idx = 0
+    # Sorted, not set order: set iteration order is randomised per process by
+    # PYTHONHASHSEED, which used to scramble which series got which uniform.
+    target_cols = sorted({"_".join(x.split("_")[:2]) for x in cols})
+
+    uniforms = uniforms_by_column(u_sample, u_columns)
+    if uniforms is not None:
+        unlabelled = [c for c in target_cols if c not in uniforms]
+        if unlabelled:
+            shown = ", ".join(unlabelled[:5])
+            more = f" (+{len(unlabelled) - 5} more)" if len(unlabelled) > 5 else ""
+            warnings.warn(
+                f"{len(unlabelled)} series have no copula uniform and will be "
+                f"sampled independently: {shown}{more}",
+                stacklevel=2,
+            )
+
     for col in target_cols:
         historical_series = y[col].pct_change().dropna()
 
@@ -132,11 +156,11 @@ def denormalize(
             probs = np.array(probs) / np.sum(probs)
 
             # Select bucket using Inverse Transform Sampling or random choice
-            if u_sample is not None and asset_idx < len(u_sample):
+            uniform = uniforms.get(col) if uniforms is not None else None
+            if uniform is not None:
                 cumulative_probs = np.cumsum(probs)
-                idx = np.searchsorted(cumulative_probs, u_sample[asset_idx])
+                idx = int(np.searchsorted(cumulative_probs, uniform))
                 sampled_q = q_list[min(idx, len(q_list) - 1)]
-                asset_idx += 1
             else:
                 sampled_q = np.random.choice(q_list, p=probs)
 
@@ -167,8 +191,10 @@ def denormalize(
             else:
                 # Absolute fallback if no KDE was computed (sparse data)
                 recent_history = historical_series.iloc[-365:]
-                lower_bound = recent_history.quantile(sampled_q / quantiles)
-                upper_bound = recent_history.quantile((sampled_q + 1) / quantiles)
+                lower_bound = float(recent_history.quantile(sampled_q / quantiles))
+                upper_bound = float(
+                    recent_history.quantile((sampled_q + 1) / quantiles)
+                )
                 value = np.random.uniform(lower_bound, upper_bound)
 
         else:
@@ -209,11 +235,11 @@ def denormalize(
 
             # 2. Select the bucket using Inverse Transform Sampling
             highest_std = 0.0
-            if u_sample is not None and asset_idx < len(u_sample):
+            uniform = uniforms.get(col) if uniforms is not None else None
+            if uniform is not None:
                 cumulative_probs = np.cumsum(probs)
-                idx = np.searchsorted(cumulative_probs, u_sample[asset_idx])
+                idx = int(np.searchsorted(cumulative_probs, uniform))
                 highest_std = stds[min(idx, len(stds) - 1)]
-                asset_idx += 1
             else:
                 highest_std = np.random.choice(stds, p=probs)
 

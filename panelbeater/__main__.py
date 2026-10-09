@@ -25,6 +25,7 @@ _TICKERS = [
     "QCOM",  # QUALCOMM Incorporated
     "BDRY",  # Breakwave Dry Bulk Shipping ETF
     "SPHD",  # Invesco S&P 500 High Dividend Low Volatility ETF
+    "NVDA",  # NVIDIA Corporation
     # Commodities
     "GC=F",  # Gold
     "CL=F",  # Crude Oil
@@ -73,8 +74,8 @@ _SIMS = 1000
 _NUM_QUANTILES = 5
 
 # Assets and Macros that will receive the KDE tail treatment
-_FLAGGED_TICKERS: list[str] = ["BDRY", "SPHD"]
-_FLAGGED_MACROS: list[str] = ["^N225", "T10Y2Y"]
+_FLAGGED_TICKERS: list[str] = ["BDRY", "SPHD", "NVDA"]
+_FLAGGED_MACROS: list[str] = ["^N225", "T10Y2Y", "GDP"]
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ from .fit import fit
 from .simulate import SIMULATION_FILENAME, run_single_simulation, simulate
 from .wt import create_wt
 
-__VERSION__ = "0.2.72"
+__VERSION__ = "0.3.0"
 __all__ = [
     "download",
     "fit",

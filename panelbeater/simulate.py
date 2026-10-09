@@ -4,12 +4,11 @@
 from typing import Any, Callable
 
 import pandas as pd
-import pyvinecopulib as pv
 import tqdm
 from joblib import Parallel, delayed
 from scipy import stats
 
-from .copula import load_vine_copula, sample_joint_step
+from .copula import VineFit, load_vine
 from .features import features
 from .normalizer import denormalize
 from .wt import create_wt
@@ -129,7 +128,7 @@ def run_single_simulation(
     days_out: int,
     windows: list[int],
     lags: list[int],
-    vine_cop: pv.Vinecop,
+    vine_fit: VineFit,
     save_state_func: Callable[[int, pd.DataFrame, bool], Any] | None = None,
     # --- NEW PARAMETERS ---
     quantiles: int | None = None,
@@ -154,7 +153,7 @@ def run_single_simulation(
         )
 
         # 2. Get Model Prediction (u_step sample from Copula)
-        u_step = sample_joint_step(vine_cop)
+        u_step = vine_fit.sample()
 
         # 3. Transform and Denormalize to get next day prices
         df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
@@ -186,7 +185,7 @@ def simulate(
     windows: list[int],
     lags: list[int],
     sim_func: Callable[
-        [int, pd.DataFrame, int, list[int], list[int], pv.Vinecop], list[pd.DataFrame]
+        [int, pd.DataFrame, int, list[int], list[int], VineFit], list[pd.DataFrame]
     ]
     | None = None,
     # --- NEW PARAMETERS ---
@@ -194,7 +193,7 @@ def simulate(
 ) -> pd.DataFrame:
     """Simulate from trained models."""
     print(f"Starting {sims} simulations in parallel...")
-    vine_cop = load_vine_copula(df_returns=df_y)
+    vine_fit = load_vine(df_returns=df_y)
     print("Loaded vine copula")
 
     # --- NEW: Precompute the KDEs once before the parallel loop ---
@@ -212,7 +211,7 @@ def simulate(
                 days_out,
                 windows,
                 lags,
-                vine_cop,
+                vine_fit,
                 None,
                 quantiles,
                 precomputed_kdes,  # --- UPDATED: Pass to parallel worker ---
@@ -220,7 +219,7 @@ def simulate(
             for i in tqdm.tqdm(range(sims), desc="Simulating")
         )
     else:
-        all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_cop)
+        all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_fit)
 
     # Combine all simulations into one large DataFrame
     df_mc = pd.concat(all_sims)  # type: ignore

@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from .copula import fit_vine_copula
+from .copula import fit_vine
 from .features import features
 from .normalizer import normalize
 from .wt import create_wt
@@ -31,7 +31,7 @@ def fit(
     returns = df_y.pct_change().dropna()
     if isinstance(returns, pd.Series):
         returns = returns.to_frame()
-    fit_vine_copula(returns)
+    fit_vine(returns)
     df_x = features(df=df_y.copy(), windows=windows, lags=lags)
     bbwidth_cols_to_drop = [col for col in df_x.columns if "_bbwidth_" in col]
     df_x = df_x.drop(columns=bbwidth_cols_to_drop)
@@ -61,7 +61,7 @@ def fit(
             returns_h = df_y.pct_change(periods=h).dropna()
             if isinstance(returns_h, pd.Series):
                 returns_h = returns_h.to_frame()
-            fit_vine_copula(returns_h, horizon=h)
+            fit_vine(returns_h, horizon=h)
 
             # 1. Normalize SPECIFICALLY for this horizon
             # --- UPDATED: Pass config down to normalize ---

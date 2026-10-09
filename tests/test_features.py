@@ -3,8 +3,8 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_series_equal
 
-from panelbeater.features import (_dt_features, _meta_ticker_feature,
-                                  _ticker_features, features)
+from panelbeater.features.core import (_dt_features, _meta_ticker_feature,
+                                       _ticker_features, features)
 
 
 @pytest.fixture
@@ -46,6 +46,7 @@ def test_ticker_features_logic(sample_data, params):
             assert f"{col}_sma_{w}" in df_result.columns
             assert f"{col}_pctchg_{w}" in df_result.columns
             assert f"{col}_z_{w}" in df_result.columns
+            assert f"{col}_ewma_{w}" in df_result.columns
 
     # Verify SMA Calculation logic (SMA / Price - 1)
     # For a window of 2 on a linear trend [100, 105.26...], manual check
@@ -60,6 +61,52 @@ def test_ticker_features_logic(sample_data, params):
         expected_sma_feature.dropna(),
         check_names=False,
         obj="SMA Feature Calculation"
+    )
+
+
+def test_ewma_feature_logic(sample_data, params):
+    """
+    Verifies the EWMA feature matches a recursive EMA deviation, stays
+    causal, and survives a series that crosses zero.
+    """
+    from panelbeater.features.rolling import _stable_rolling_std
+
+    df_result = _ticker_features(sample_data.copy(), params["windows"])
+
+    col, w = "AAPL", params["windows"][0]
+    s = sample_data[col]
+    ewma = s.ewm(span=w, adjust=False).mean()
+    sigma = _stable_rolling_std(s, w)
+    expected = ((ewma - s) / (s.abs() + sigma.abs() + 1e-8)).fillna(0)
+
+    assert_series_equal(
+        df_result[f"{col}_ewma_{w}"],
+        expected,
+        check_names=False,
+        obj="EWMA Feature Calculation",
+    )
+
+
+def test_ewma_is_causal_and_zero_crossing_safe():
+    """
+    A later value must never change an earlier EWMA (no lookahead), and a
+    series crossing zero must not blow the feature up.
+    """
+    dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    # Spread-like series that crosses zero, as T10Y2Y does when inverting.
+    crossing = pd.DataFrame({"T10Y2Y": np.linspace(1.0, -1.0, 40)}, index=dates)
+
+    out = _ticker_features(crossing.copy(), [5])["T10Y2Y_ewma_5"]
+    assert np.isfinite(out).all(), "zero crossing produced inf/nan"
+    assert out.abs().max() < 1e3, "zero crossing blew the feature up"
+
+    # Causality: perturbing the last row must not alter any earlier value.
+    perturbed = crossing.copy()
+    perturbed.iloc[-1, 0] = 500.0
+    out_perturbed = _ticker_features(perturbed, [5])["T10Y2Y_ewma_5"]
+    assert_series_equal(
+        out.iloc[:-1], out_perturbed.iloc[:-1], check_names=False,
+        obj="EWMA causality",
     )
 
 
