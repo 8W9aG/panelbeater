@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed: `simulate()` would fail once the copula is refitted
+
+`fit()` fitted the vine copula on returns (`df_y.pct_change().dropna()`), but
+`simulate()` loaded it with prices. The cache file is found by column names, so the
+right file was opened, but `load_vine` then validates its contents against the frame
+it is given and raises `ValueError: historical rows changed since the fit`.
+
+**Impact.** None so far: the cache files written before 0.3.0 have no metadata
+sidecar, so the check was skipped. The first training run with 0.3.0 or later writes
+a sidecar, and inference after that would have failed.
+
+Both sides now build the frame with the new `copula.vine_returns(df_y, horizon=1)`
+(`fit()` for every horizon, `simulate()` when loading).
+
+### Changed: simulation advances paths in lockstep batches
+
+`simulate()` used to run one task per path. Every path built its own wavetrainer
+`Trainer` and called `transform()` on a single row each simulated day. That call's
+cost is almost all fixed per trained column, not per row: on ~480 trained columns, one
+row took ~102s and six stacked rows ~109s.
+
+Now `simulate()` splits the paths into one batch per worker. The new
+`run_simulation_batch()` advances a batch's paths together, one day at a time, and
+makes **one** `transform()` call per day for the whole batch, with one `Trainer`
+shared by every path in it. This is exact because every path visits the same dates:
+`denormalize` always appends the next calendar day, and wavetrainer picks each row's
+walk-forward fold from its date alone. A stacked call was verified to return
+bit-identical predictions to per-row calls on the real model folder.
+
+Measured at small scale (12 paths × 2 days, 2 workers): 2,448s before, 760s after
+(3.2x). The gain grows with batch size, because the `transform()` cost is paid once
+per batch per day. `features()` is still computed per path (~31s per path per day)
+and is now most of the remaining time.
+
+**Reproducibility.** A single path is unchanged: with `np.random` and the vine seeded,
+`run_single_simulation` gives bit-identical output to 0.3.0. With several paths, each
+day's copula draws are now taken path by path within the batch, so the draws
+interleave differently and a seeded multi-path run differs from 0.3.0's. The
+distributions are the same: comparing per-asset means and spreads of simulated
+returns between the two loops showed no difference beyond sampling noise.
+
+### Fixed: nested parallelism in simulation
+
+`run_single_simulation` called `Trainer.transform()` with wavetrainer's default
+`n_jobs=-1` from inside `simulate()`'s own `Parallel(n_jobs=-1)`, so each worker
+started a second pool: up to cores² processes. On a 10-core, 64GB machine swap grew
+by 33GB within three minutes. Simulation now
+calls `transform()` with `n_jobs=1`.
+
+### Added
+
+- `run_simulation_batch(sim_indices, df_y, days_out, windows, lags, vine_fit, ...,
+  n_jobs=1)`, returning one frame per path in the same form `run_single_simulation`
+  returns.
+- `simulate(..., n_jobs=-1)`: how many batches run at once. Each worker holds every
+  trained column's models (~5GB) and `features()` briefly needs ~13GB more, so a
+  worker peaks at ~15-18GB. Set it from memory, not core count. The CLI now uses 3.
+- `run_single_simulation(..., n_jobs=1)`. It is now a batch of one, and `simulate()`
+  no longer calls it. A caller that runs one path per machine (e.g. one per
+  container) should pass `n_jobs=-1`: at the default, one path runs `transform()`
+  on one core (~3.7x slower than with every core, measured on wavetrainer 0.3.26).
+- `copula.vine_returns(df_y, horizon=1)`.
+- `run.sh` reruns `panelbeater` until it exits 0, with backoff, and stops on a
+  deliberate signal (Ctrl-C, SIGTERM…) but retries crashes. Its watchdog treats a
+  run with no output for `HANG_TIMEOUT` seconds (default 1200) as hung, dumps every
+  thread's stack with `py-spy` to `hangs/`, kills it and retries. Settings are
+  environment variables, documented at the top of the script. `py-spy` is added to
+  `requirements-dev.txt`, and `hangs/` is gitignored.
+- Tests: `test_simulate.py` (batching logic), `test_fit_simulate.py` (`fit()` then
+  `simulate()` share the vine) and `test_denormalize_snapshot.py`.
+
+### Changed
+
+- **Requires wavetrainer >= 0.3.27.** On pandas 3, earlier versions fail every
+  `transform()` call ("assignment destination is read-only" in the power-transformer
+  normaliser). 0.3.27 makes that normaliser a no-op, which is what it already was on
+  pandas 2, so predictions are unchanged (verified bit-identical on the real model
+  folder), and makes `transform()` about 3x faster.
+- `denormalize` is faster: `y`'s columns are added in one step, each series' columns
+  are grouped once instead of scanned for every lookup, and the new row is written in
+  one assignment. Output is unchanged: `test_denormalize_snapshot.py` checks seeded
+  results bit for bit against the previous implementation, including how many random
+  numbers each call consumes.
+- Training runs Optuna trials with `n_jobs=1` (was 4). Optuna runs parallel trials as
+  threads in one process, and concurrent CatBoost fits there segfault and deadlock.
+  Each fit already uses every core.
+
 ## 0.3.0
 
 ### Fixed: copula uniforms were assigned to the wrong columns (joint quantities affected)

@@ -21,6 +21,15 @@ def _is_float(s: str) -> bool:
         return False
 
 
+def _last_valid(s: pd.Series):
+    """Same as `s.dropna().iloc[-1]`, without building the filtered Series."""
+    values = s.to_numpy()
+    valid = np.flatnonzero(~pd.isna(values))
+    if not valid.size:
+        raise IndexError("single positional indexer is out-of-bounds")
+    return values[valid[-1]]
+
+
 def normalize(
     df: pd.DataFrame,
     horizon: int = 1,
@@ -110,16 +119,31 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
     `u_columns`. Series with no uniform are sampled independently.
     """
     df = df.reindex(y.index)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=PerformanceWarning)
-        for col in y.columns:
-            df[col] = y[col]
+    # Add y's columns in one go rather than one insert per column: existing
+    # columns are overwritten in place, new ones appended in y's order.
+    existing = [c for c in y.columns if c in df.columns]
+    if existing:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=PerformanceWarning)
+            df[existing] = y[existing]
+    new = [c for c in y.columns if c not in df.columns]
+    if new:
+        df = pd.concat([df, y[new]], axis=1)
     date_to_add = df.index[-1] + pd.Timedelta(days=1)
 
     cols = set(df.columns.values.tolist())
     # Sorted, not set order: set iteration order is randomised per process by
     # PYTHONHASHSEED, which used to scramble which series got which uniform.
     target_cols = sorted({"_".join(x.split("_")[:2]) for x in cols})
+
+    # Group columns by series once, so lookups below scan one series' columns
+    # instead of all of them. Every column starting with f"{col}_" shares col's
+    # two-part key. A key with no "_" (a one-part column name) has no such
+    # guarantee, so it keeps searching every column.
+    all_cols = list(cols)
+    cols_by_series: dict[str, list[str]] = {}
+    for x in all_cols:
+        cols_by_series.setdefault("_".join(x.split("_")[:2]), []).append(x)
 
     uniforms = uniforms_by_column(u_sample, u_columns)
     if uniforms is not None:
@@ -133,11 +157,13 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
                 stacklevel=2,
             )
 
+    new_values: dict[str, float] = {}
     for col in target_cols:
-        historical_series = y[col].pct_change().dropna()
+        y_col = y[col]
+        series_cols = cols_by_series[col] if "_" in col else all_cols
 
         # Check if this asset is using the new Quantile format
-        is_quantile = any(x.startswith(f"{col}_q") for x in cols)
+        is_quantile = any(x.startswith(f"{col}_q") for x in series_cols)
 
         if is_quantile and quantiles is not None:
             # --- QUANTILE INFERENCE RECONSTRUCTION ---
@@ -147,11 +173,11 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
                 prob_col = sorted(
                     [
                         x
-                        for x in cols
+                        for x in series_cols
                         if x.startswith(f"{col}_q{q}_{PROBABILITY_COLUMN_PREFIX}")
                     ]
                 )[-1]
-                probs.append(df[prob_col].dropna().iloc[-1])
+                probs.append(_last_valid(df[prob_col]))
 
             probs = np.array(probs) / np.sum(probs)
 
@@ -190,7 +216,7 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
                     )
             else:
                 # Absolute fallback if no KDE was computed (sparse data)
-                recent_history = historical_series.iloc[-365:]
+                recent_history = y_col.pct_change().dropna().iloc[-365:]
                 lower_bound = float(recent_history.quantile(sampled_q / quantiles))
                 upper_bound = float(
                     recent_history.quantile((sampled_q + 1) / quantiles)
@@ -201,7 +227,7 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
             # --- ORIGINAL Z-SCORE INFERENCE RECONSTRUCTION ---
             z_cols = {
                 x
-                for x in cols
+                for x in series_cols
                 if x.startswith(col)
                 and x != col
                 and x.split("_")[1] == col.split("_")[1]
@@ -226,8 +252,10 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
             probs = []
             for std in stds:
                 std_suffix = f"{col}_{std}_{PROBABILITY_COLUMN_PREFIX}"
-                prob_col = sorted([x for x in cols if x.startswith(std_suffix)])[-1]
-                prob = df[prob_col].dropna().iloc[-1]
+                prob_col = sorted(
+                    [x for x in series_cols if x.startswith(std_suffix)]
+                )[-1]
+                prob = _last_valid(df[prob_col])
                 probs.append(prob)
 
             # Normalize probabilities (ensure they sum to 1.0)
@@ -244,6 +272,7 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
                 highest_std = np.random.choice(stds, p=probs)
 
             # 3. Use Pandas rolling on the historical y dataframe to avoid ndarray errors
+            historical_series = y_col.pct_change().dropna()
             mu = 0.0
             sigma = 0.0
             try:
@@ -262,20 +291,26 @@ def denormalize(  # pylint: disable=too-many-arguments,too-many-positional-argum
         null_prefix = f"{col}_null_{PROBABILITY_COLUMN_PREFIX}"
 
         # Find the matching column in 'cols'
-        possible_null_cols = [x for x in cols if x.startswith(null_prefix)]
+        possible_null_cols = [x for x in series_cols if x.startswith(null_prefix)]
 
         if possible_null_cols:
             # Select the correct column (handling versions/suffixes)
             null_prob_col = sorted(possible_null_cols)[-1]
 
             # Get the probability of being exactly null
-            null_prob = df[null_prob_col].dropna().iloc[-1]
+            null_prob = _last_valid(df[null_prob_col])
 
             # Run random check
             # Note: We use standard random here to avoid consuming extra indices from u_sample
             if np.random.uniform(0, 1) < null_prob:
                 value = 0.0  # Force exact same price (0% change)
 
-        df.loc[date_to_add, col] = y[col].iloc[-1] * (1.0 + value)
+        new_values[col] = y_col.iloc[-1] * (1.0 + value)
 
-    return df[sorted(target_cols)]  # pyright: ignore
+    # Only the target columns are returned, so add the new row to those alone,
+    # in one assignment. Series skipped above are left NaN (or untouched, if
+    # the row already exists), exactly as per-cell assignment would leave them.
+    result = df[sorted(target_cols)].copy()
+    if new_values:
+        result.loc[date_to_add, list(new_values)] = list(new_values.values())
+    return result  # pyright: ignore

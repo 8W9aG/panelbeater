@@ -69,6 +69,10 @@ _WINDOWS = [
 _LAGS = [1, 3, 5, 10, 20, 30]
 _DAYS_OUT = 32
 _SIMS = 1000
+# Simulation workers. Each peaks at ~15-18GB (features() transiently reaches
+# ~13GB building every feature column over the lookback, on top of ~5GB of
+# cached models), so one per core does not fit in 64GB.
+_SIM_N_JOBS = 3
 
 # --- NEW: Quantile & Flagged Target Configurations ---
 _NUM_QUANTILES = 5
@@ -119,7 +123,10 @@ def main() -> None:
             quantiles=args.quantiles,
             flagged_tickers=_FLAGGED_TICKERS,
             flagged_macros=_FLAGGED_MACROS,
-            n_jobs=4,
+            # Optuna runs n_jobs > 1 trials as threads in this process, and
+            # concurrent CatBoost fits there segfault and deadlock. Each fit
+            # already uses every core, so parallel trials gain little anyway.
+            n_jobs=1,
         )
 
     if args.inference:
@@ -130,6 +137,7 @@ def main() -> None:
             windows=_WINDOWS,
             lags=_LAGS,
             quantiles=args.quantiles,
+            n_jobs=_SIM_N_JOBS,
         )
 
 

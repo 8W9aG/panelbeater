@@ -1,14 +1,16 @@
 """Handle simulations from the models."""
-# pylint: disable=too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 
 from typing import Any, Callable
 
+import joblib
+import numpy as np
 import pandas as pd
 import tqdm
 from joblib import Parallel, delayed
 from scipy import stats
 
-from .copula import VineFit, load_vine
+from .copula import VineFit, load_vine, vine_returns
 from .features import features
 from .normalizer import denormalize
 from .wt import create_wt
@@ -122,6 +124,101 @@ def precompute_kdes(df_y: pd.DataFrame, quantiles: int) -> dict:
     return kdes
 
 
+def run_simulation_batch(
+    sim_indices: list[int],
+    df_y: pd.DataFrame,
+    days_out: int,
+    windows: list[int],
+    lags: list[int],
+    vine_fit: VineFit,
+    save_state_func: Callable[[int, pd.DataFrame, bool], Any] | None = None,
+    quantiles: int | None = None,
+    precomputed_kdes: dict | None = None,
+    n_jobs: int = 1,
+) -> list[pd.DataFrame]:
+    """
+    Generates one Monte Carlo path per entry of `sim_indices`, advanced in lockstep.
+
+    Every path visits the same dates in the same order: denormalize always
+    appends index[-1] + 1 day, and wavetrainer picks each row's walk-forward
+    fold from its date alone. So each day the paths' feature rows can be
+    stacked into a single transform() call, which returns exactly what
+    per-row calls do. That call's cost is almost all fixed per trained column
+    (pandas overhead and each column's reducer/selector/model pipeline), not
+    per row: measured on ~480 columns, one row took ~102s and six stacked rows
+    ~109s. So one call per day for the whole batch pays it once instead of
+    once per path. The batch also shares one Trainer and its model cache.
+
+    The paths stay independent: each keeps its own df_y, copula draw and
+    denormalize sample. features() is still per path, ~30s each per day.
+
+    `n_jobs` is transform()'s own column-level parallelism. It defaults to 1
+    because simulate() already runs batches in parallel; raise it only when
+    calling this directly with fewer batches than cores.
+    """
+    # Every path starts from the same history and then grows its own.
+    path_ys = [df_y.copy() for _ in sim_indices]
+    # One Trainer for the whole batch, so its model cache is filled once and
+    # reused every day by every path.
+    wavetrainer = create_wt()
+    feature_lookback = _feature_lookback(windows, lags)
+
+    for _ in tqdm.tqdm(range(days_out), desc="Simulation Days"):
+        # 1. Feature Engineering, one last row per path. Only the last row is
+        # needed (it predicts the next day); [[-1]] keeps it a one-row frame
+        # for the concat below. features() is written to modify the frame it is
+        # given (_ticker_features works in place), so it gets a copy rather
+        # than the path's own history.
+        x_rows = [
+            features(
+                df=path_y.copy(),
+                windows=windows,
+                lags=lags,
+                lookback=feature_lookback,
+                hp_lookback=_SIMULATION_HP_LOOKBACK,
+            ).iloc[[-1]]
+            for path_y in path_ys
+        ]
+
+        # 2. One stacked model prediction for the whole batch. All rows share
+        # one date (the duplicate index is fine), so every row uses the same
+        # walk-forward fold and the result matches per-row calls exactly.
+        # concat keeps path order, so row i of df_next belongs to path i.
+        x_batch = pd.concat(x_rows)
+        # n_jobs defaults to 1: simulate() already runs batches in parallel,
+        # and transform()'s own pool inside each worker would oversubscribe
+        # the machine (up to cores^2 processes).
+        df_next = wavetrainer.transform(
+            x_batch, ignore_no_dates=True, n_jobs=n_jobs
+        ).drop(columns=x_batch.columns.values.tolist())
+
+        # 3. Sample from the copula and denormalize to get each path's next day.
+        # Each path draws once per day, in path order. With one path this is
+        # the same draw sequence as the old one-path loop, so its output is
+        # unchanged; with several, the paths' draws interleave.
+        for i, sim_idx in enumerate(sim_indices):
+            u_step = vine_fit.sample()
+            # denormalize only reads y, so the path's frame needs no copy.
+            path_ys[i] = denormalize(
+                df_next.iloc[[i]],
+                y=path_ys[i],
+                u_sample=u_step,
+                quantiles=quantiles,
+                precomputed_kdes=precomputed_kdes,
+            )
+
+            if save_state_func is not None:
+                save_state_func(sim_idx, path_ys[i], False)
+
+    # Mark the simulation index and return only the relevant tail (for memory efficiency)
+    results = []
+    for sim_idx, path_y in zip(sim_indices, path_ys):
+        df_result = path_y.tail(days_out + 1).copy()
+        df_result[SIMULATION_COLUMN] = sim_idx
+        results.append(df_result)
+    return results
+
+
 def run_single_simulation(
     sim_idx: int,
     df_y,
@@ -130,52 +227,30 @@ def run_single_simulation(
     lags: list[int],
     vine_fit: VineFit,
     save_state_func: Callable[[int, pd.DataFrame, bool], Any] | None = None,
-    # --- NEW PARAMETERS ---
     quantiles: int | None = None,
     precomputed_kdes: dict | None = None,
+    n_jobs: int = 1,
 ):
     """
     Encapsulates a single Monte Carlo path generation.
+
+    simulate() no longer calls this, it runs batches. It is kept, as a batch of
+    one, for external callers (panelbeater-modal runs one path per container).
+    Such a caller can pass n_jobs=-1 to spread transform() over the trained
+    columns instead, since nothing else is using the machine's cores.
     """
-    # Local copies for thread-safety (though joblib uses processes)
-    df_y = df_y.copy()
-    wavetrainer = create_wt()
-    feature_lookback = _feature_lookback(windows, lags)
-
-    for _ in tqdm.tqdm(range(days_out), desc="Simulation Days"):
-        # 1. Feature Engineering
-        df_x = features(
-            df=df_y.copy(),
-            windows=windows,
-            lags=lags,
-            lookback=feature_lookback,
-            hp_lookback=_SIMULATION_HP_LOOKBACK,
-        )
-
-        # 2. Get Model Prediction (u_step sample from Copula)
-        u_step = vine_fit.sample()
-
-        # 3. Transform and Denormalize to get next day prices
-        df_next = wavetrainer.transform(df_x.iloc[[-1]], ignore_no_dates=True).drop(
-            columns=df_x.columns.values.tolist()
-        )
-
-        # --- UPDATED: Pass quantiles and KDEs down to denormalize ---
-        df_y = denormalize(
-            df_next,
-            y=df_y.copy(),
-            u_sample=u_step,
-            quantiles=quantiles,
-            precomputed_kdes=precomputed_kdes,
-        )
-
-        if save_state_func is not None:
-            save_state_func(sim_idx, df_y, False)
-
-    # Mark the simulation index and return only the relevant tail (for memory efficiency)
-    df_result = df_y.tail(days_out + 1).copy()
-    df_result[SIMULATION_COLUMN] = sim_idx
-    return df_result
+    return run_simulation_batch(
+        [sim_idx],
+        df_y,
+        days_out,
+        windows,
+        lags,
+        vine_fit,
+        save_state_func=save_state_func,
+        quantiles=quantiles,
+        precomputed_kdes=precomputed_kdes,
+        n_jobs=n_jobs,
+    )[0]
 
 
 def simulate(
@@ -190,10 +265,19 @@ def simulate(
     | None = None,
     # --- NEW PARAMETERS ---
     quantiles: int | None = None,
+    n_jobs: int = -1,
 ) -> pd.DataFrame:
-    """Simulate from trained models."""
+    """Simulate from trained models.
+
+    `n_jobs` is how many batches run at once (joblib's convention, -1 for one
+    per core). Each worker holds every trained column's models (~5GB) and
+    features() briefly needs ~13GB more, so on a machine with less memory than
+    cores x that, pass fewer.
+    """
     print(f"Starting {sims} simulations in parallel...")
-    vine_fit = load_vine(df_returns=df_y)
+    # Load with the same returns frame fit() fitted on: the cache is validated
+    # against its contents, so loading with prices would be rejected.
+    vine_fit = load_vine(df_returns=vine_returns(df_y))
     print("Loaded vine copula")
 
     # --- NEW: Precompute the KDEs once before the parallel loop ---
@@ -203,10 +287,19 @@ def simulate(
         precomputed_kdes = precompute_kdes(df_y, quantiles)
 
     if sim_func is None:
-        # n_jobs=-1 uses all available CPU cores
-        all_sims = Parallel(n_jobs=-1)(
-            delayed(run_single_simulation)(
-                i,
+        # One lockstep batch per worker: see run_simulation_batch for why
+        # batching paths beats one path per task. Fewer, larger batches are
+        # cheaper (transform() costs about the same for one row as for many),
+        # so there are exactly as many batches as workers. min() avoids empty
+        # batches when there are fewer paths than workers.
+        batches = np.array_split(
+            np.arange(sims), min(sims, joblib.effective_n_jobs(n_jobs))
+        )
+        # n_jobs is deliberately not passed into the batches: each keeps
+        # transform() at n_jobs=1 (see run_simulation_batch).
+        batch_results = Parallel(n_jobs=n_jobs)(
+            delayed(run_simulation_batch)(
+                batch.tolist(),
                 df_y.copy(),
                 days_out,
                 windows,
@@ -214,10 +307,13 @@ def simulate(
                 vine_fit,
                 None,
                 quantiles,
-                precomputed_kdes,  # --- UPDATED: Pass to parallel worker ---
+                precomputed_kdes,
             )
-            for i in tqdm.tqdm(range(sims), desc="Simulating")
+            for batch in tqdm.tqdm(batches, desc="Simulating")
         )
+        # Batches are contiguous ranges returned in order, so flattening keeps
+        # paths in simulation-index order, as one task per path did.
+        all_sims = [df for batch in batch_results for df in batch]  # type: ignore
     else:
         all_sims = sim_func(sims, df_y.copy(), days_out, windows, lags, vine_fit)
 

@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from .copula import fit_vine
+from .copula import fit_vine, vine_returns
 from .features import features
 from .normalizer import normalize
 from .wt import create_wt
@@ -27,11 +27,9 @@ def fit(
     """Fit the models."""
     wavetrainer = create_wt(n_jobs=n_jobs)
     # Fit Vine Copula on historical returns
-    # We use pct_change to capture the dependency of returns
-    returns = df_y.pct_change().dropna()
-    if isinstance(returns, pd.Series):
-        returns = returns.to_frame()
-    fit_vine(returns)
+    # We use pct_change to capture the dependency of returns. simulate() must
+    # load it with the same frame, so both build it with vine_returns().
+    fit_vine(vine_returns(df_y))
     df_x = features(df=df_y.copy(), windows=windows, lags=lags)
     bbwidth_cols_to_drop = [col for col in df_x.columns if "_bbwidth_" in col]
     df_x = df_x.drop(columns=bbwidth_cols_to_drop)
@@ -58,10 +56,7 @@ def fit(
             # 1. Fit Copula for THIS Horizon
             # We calculate specific h-day returns so the copula learns the correct
             # dependency structure (e.g., 30-day correlations vs 1-day correlations)
-            returns_h = df_y.pct_change(periods=h).dropna()
-            if isinstance(returns_h, pd.Series):
-                returns_h = returns_h.to_frame()
-            fit_vine(returns_h, horizon=h)
+            fit_vine(vine_returns(df_y, horizon=h), horizon=h)
 
             # 1. Normalize SPECIFICALLY for this horizon
             # --- UPDATED: Pass config down to normalize ---

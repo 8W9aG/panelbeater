@@ -183,6 +183,20 @@ def load_vine(
     return VineFit(copula=cop, columns=list(meta["columns"]))
 
 
+def vine_returns(df_y: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
+    """
+    The returns frame a price panel's vine is fitted on and loaded with.
+
+    The cache is found by column names but validated against these exact
+    values, so fitting and loading must both build it here: loading with the
+    prices instead finds the right file and then fails the content check.
+    """
+    returns = df_y.pct_change(periods=horizon).dropna()
+    if isinstance(returns, pd.Series):
+        returns = returns.to_frame()
+    return returns
+
+
 def fit_vine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     df_returns: pd.DataFrame,
     horizon: int = 1,

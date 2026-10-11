@@ -226,3 +226,6 @@ model_evaluation_tearsheet.txt
 Model_Evaluation_Report.pdf
 node_importances.json
 panelbeater-train.zip
+
+# run.sh hang stack dumps
+hangs/
